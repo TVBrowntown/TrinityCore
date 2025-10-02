@@ -37,8 +37,10 @@
 #include "Vehicle.h"
 #include "World.h"
 #include "WorldPacket.h"
+
 // @tswow-begin
 #include "TSAura.h"
+#include "TSDynObj.h"
 // @tswow-end
 // @duskhaven-port
 #include "TSDynObj.h"
