@@ -320,7 +320,7 @@ class TC_GAME_API InstanceScript : public ZoneScript
         virtual void UpdateDoorState(GameObject* door);
         void UpdateMinionState(Creature* minion, EncounterState state);
 
-        void UpdateSpawnGroups();
+        virtual void UpdateSpawnGroups();
 
         // Exposes private data that should never be modified unless exceptional cases.
         // Pay very much attention at how the returned BossInfo data is modified to avoid issues.
@@ -335,6 +335,11 @@ class TC_GAME_API InstanceScript : public ZoneScript
         virtual void WriteSaveDataMore(std::ostringstream& /*data*/) { }
 
         bool _SkipCheckRequiredBosses(Player const* player = nullptr) const;
+
+    protected:
+        // Spawn groups for this instance - moved to protected so CustomInstance can access it
+        std::vector<InstanceSpawnGroupInfo> const* const _instanceSpawnGroups;
+
     private:
         static void LoadObjectData(ObjectData const* creatureData, ObjectInfoMap& objectInfo);
         void UpdateEncounterState(EncounterCreditType type, uint32 creditEntry, Unit* source);
@@ -347,7 +352,6 @@ class TC_GAME_API InstanceScript : public ZoneScript
         ObjectInfoMap _gameObjectInfo;
         ObjectGuidMap _objectGuids;
         uint32 completedEncounters; // completed encounter mask, bit indexes are DungeonEncounter.dbc boss numbers, used for packets
-        std::vector<InstanceSpawnGroupInfo> const* const _instanceSpawnGroups;
         std::unordered_set<uint32> _activatedAreaTriggers;
         // @tswow-begin
         std::vector<AreaBoundary*> _customBoundaries;
