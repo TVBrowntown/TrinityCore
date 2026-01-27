@@ -847,6 +847,16 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
 
     uint32 health = victim->GetHealth();
 
+    // Refresh combat damage time for PvE combat when actual damage is dealt
+    // This enables the 16-second combat timeout feature
+    if (attacker && attacker != victim && damagetype != DOT)
+    {
+        if (CombatReference* ref = Trinity::Containers::MapGetValuePtr(attacker->GetCombatManager().GetPvECombatRefs(), victim->GetGUID()))
+            ref->RefreshDamageTime();
+        if (CombatReference* ref = Trinity::Containers::MapGetValuePtr(victim->GetCombatManager().GetPvECombatRefs(), attacker->GetGUID()))
+            ref->RefreshDamageTime();
+    }
+
     // duel ends when player has 1 or less hp
     bool duel_hasEnded = false;
     bool duel_wasMounted = false;
