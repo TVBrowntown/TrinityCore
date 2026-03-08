@@ -1022,7 +1022,8 @@ void Spell::EffectJump()
 
     float speedXY, speedZ;
     CalculateJumpSpeeds(*effectInfo, unitCaster->GetExactDist2d(unitTarget), speedXY, speedZ);
-    unitCaster->GetMotionMaster()->MoveJump(*unitTarget, speedXY, speedZ, EVENT_JUMP, false);
+    uint32 triggerSpell = m_spellValue->EffectTriggerSpell[effectInfo->EffectIndex] ? m_spellValue->EffectTriggerSpell[effectInfo->EffectIndex] : effectInfo->TriggerSpell;
+    unitCaster->GetMotionMaster()->MoveJump(*unitTarget, speedXY, speedZ, EVENT_JUMP, false, m_spellInfo->Id, triggerSpell);
 }
 
 void Spell::EffectJumpDest()
@@ -1052,7 +1053,8 @@ void Spell::EffectJumpDest()
                 TSNumber<float>(destTarget->GetPositionX()),
                 TSNumber<float>(destTarget->GetPositionY()),
                 TSNumber<float>(destTarget->GetPositionZ()));
-    unitCaster->GetMotionMaster()->MoveJump(*destTarget, speedXY, speedZ, EVENT_JUMP, !m_targets.GetObjectTargetGUID().IsEmpty());
+    uint32 triggerSpell = m_spellValue->EffectTriggerSpell[effectInfo->EffectIndex] ? m_spellValue->EffectTriggerSpell[effectInfo->EffectIndex] : effectInfo->TriggerSpell;
+    unitCaster->GetMotionMaster()->MoveJump(*destTarget, speedXY, speedZ, EVENT_JUMP, !m_targets.GetObjectTargetGUID().IsEmpty(), m_spellInfo->Id, triggerSpell);
 }
 
 void Spell::EffectTeleportUnits()
