@@ -30,6 +30,9 @@
 #include "SpellHistory.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
+//npcbot
+#include "Creature.h"
+//end npcbot
 
 enum WarriorSpells
 {
@@ -264,6 +267,11 @@ class spell_warr_deep_wounds_aura : public AuraScript
         DamageInfo* damageInfo = eventInfo.GetDamageInfo();
         if (!damageInfo)
             return false;
+
+        //npcbot: allow for bots
+        if (eventInfo.GetActor()->IsNPCBot())
+            return true;
+        //end npcbot
 
         return eventInfo.GetActor()->GetTypeId() == TYPEID_PLAYER;
     }

@@ -63,6 +63,7 @@
 #include "Log.h"
 #include "LootItemStorage.h"
 #include "LootMgr.h"
+#include "AOELoot.h"
 #include "Mail.h"
 #include "MailPackets.h"
 #include "MapManager.h"
@@ -108,6 +109,11 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "WorldStatePackets.h"
+//npcbot
+#include "botconfig.h"
+#include "botdatamgr.h"
+#include "botmgr.h"
+//end npcbot
 // @tswow-begin
 #include "TSProfile.h"
 #include "TSEvents.h"
@@ -199,6 +205,10 @@ Player::Player(WorldSession* session): Unit(true)
     m_valuesCount = PLAYER_END;
 
     m_session = session;
+
+    //npcbot: initialize bot manager
+    _botMgr = new BotMgr(this);
+    //end npcbot
 
     m_ingametime = 0;
     m_sharedQuestId = 0;
@@ -363,6 +373,35 @@ Player::Player(WorldSession* session): Unit(true)
     m_baseHealthRegen = 0;
     m_spellPenetrationItemMod = 0;
 
+    // @tswow-begin: Initialize stat override system
+    for (uint8 i = 0; i < MAX_STATS; ++i)
+        m_overrideStats[i] = -1;
+    m_overrideMaxHealth = -1;
+    m_overrideMaxMana = -1;
+    m_overrideManaRegen = -1.0f;
+    m_overrideAttackPower = -1;
+    m_overrideRangedAttackPower = -1;
+    m_overrideMeleeCrit = -1;
+    m_overrideRangedCrit = -1;
+    for (uint8 i = 0; i < MAX_SPELL_SCHOOL; ++i)
+        m_overrideSpellCrit[i] = -1;
+    m_overrideMeleeHit = -1;
+    m_overrideRangedHit = -1;
+    m_overrideSpellHit = -1;
+    m_overrideArmor = -1;
+    m_overrideDefense = -1;
+    m_overrideDodge = -1;
+    m_overrideParry = -1;
+    m_overrideBlock = -1;
+    m_overrideShieldBlockValue = -1;
+    m_overrideSpellPower = -1;
+    m_overrideHealingPower = -1;
+    m_overrideExpertise = -1;
+    m_overrideArmorPenetration = -1;
+    for (uint8 i = 0; i < MAX_SPELL_SCHOOL; ++i)
+        m_overrideResistances[i] = -1;
+    // @tswow-end
+
     // Honor System
     m_lastHonorUpdateTime = GameTime::GetGameTime();
 
@@ -457,6 +496,9 @@ Player::~Player()
     delete m_achievementMgr;
     delete m_reputationMgr;
     delete _cinematicMgr;
+    //npcbot
+    delete _botMgr;
+    //end npcbot
 
     sWorld->DecreasePlayerCount();
 }
@@ -2270,6 +2312,11 @@ Creature* Player::GetNPCIfCanInteractWith(ObjectGuid const& guid, NPCFlags npcFl
     if (creature->GetCharmerGUID())
         return nullptr;
 
+    //npcbot
+    if (creature->IsNPCBot() && creature->IsWithinDistInMap(this, INTERACTION_DISTANCE))
+        return creature;
+    //end npcbot
+
     // not unfriendly/hostile
     if (creature->GetReactionTo(this) <= REP_UNFRIENDLY)
         return nullptr;
@@ -2391,6 +2438,9 @@ void Player::SetGameMaster(bool on)
         UpdateArea(m_areaUpdateId);
 
         m_serverSideVisibilityDetect.SetValue(SERVERSIDE_VISIBILITY_GM, SEC_PLAYER);
+    //npcbot: pet is handled already, bots are not, so do it
+    _botMgr->OnOwnerSetGameMaster(on);
+    //end npcbot
     }
 
     UpdateObjectVisibility();
@@ -2474,6 +2524,52 @@ void Player::RemoveFromGroup(Group* group, ObjectGuid guid, RemoveMethod method 
     if (!group)
         return;
 
+    //npcbot - player is being removed from group - remove bots from that group
+    if (Player* player = ObjectAccessor::FindPlayer(guid))
+    {
+        if (player->HaveBot())
+        {
+            //remove npcbots and set up new group if needed
+            player->GetBotMgr()->RemoveAllBotsFromGroup();
+            group = player->GetGroup();
+            if (!group)
+                return; //group has been disbanded
+        }
+    }
+    //npcbot - deleting player from db: remove bots
+    else if (guid.IsPlayer())
+    {
+        std::vector<ObjectGuid> botguids;
+        botguids.reserve(BotCfg::GetMaxNpcBots(DEFAULT_MAX_LEVEL) / 2 + 1);
+        BotDataMgr::GetNPCBotGuidsByOwner(botguids, guid, true);
+        for (std::vector<ObjectGuid>::const_iterator ci = botguids.begin(); ci != botguids.end(); ++ci)
+        {
+            if (group->IsMember(*ci))
+            {
+                if (!group->RemoveMember(*ci, method, kicker, reason))
+                    return;
+            }
+        }
+    }
+    //npcbot - bot is being removed from group - find master and remove bot through botmap
+    else if (guid.IsCreature())
+    {
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+        {
+            if (Player* member = itr->GetSource())
+            {
+                if (!member->HaveBot())
+                    continue;
+
+                if (Creature* bot = member->GetBotMgr()->GetBot(guid))
+                {
+                    member->GetBotMgr()->RemoveBotFromGroup(bot);
+                    return;
+                }
+            }
+        }
+    }
+
     group->RemoveMember(guid, method, kicker, reason);
 }
 
@@ -2508,6 +2604,9 @@ void Player::GiveXP(uint32 xp, Unit* victim, float group_rate)
         return;
 
     if (victim && victim->GetTypeId() == TYPEID_UNIT && !victim->ToCreature()->hasLootRecipient())
+    //npcbot
+        if (!(victim->IsNPCBot() && victim->FindMap() && victim->GetMap()->IsBattleground()))
+    //end npcbot
         return;
 
     uint8 level = GetLevel();
@@ -2646,6 +2745,9 @@ void Player::GiveLevel(uint8 level)
     // @tswow-end
 
     sScriptMgr->OnPlayerLevelChanged(this, oldLevel);
+    //npcbot: force bots to update stats
+    _botMgr->SetBotsShouldUpdateStats();
+    //end npcbot
 }
 
 bool Player::IsMaxLevel() const
@@ -4415,6 +4517,11 @@ void Player::DeleteFromDB(ObjectGuid playerguid, uint32 accountId, bool updateRe
             trans->Append(stmt);
 
             Corpse::DeleteFromDB(playerguid, trans);
+            //npcbot - erase npcbots and manager data
+            uint32 newOwner = 0;
+            BotDataMgr::UpdateNpcBotDataAll(guid, NPCBOT_UPDATE_OWNER, &newOwner);
+            BotDataMgr::EraseNpcBotMgrData(playerguid);
+            //end npcbot
             break;
         }
         // The character gets unlinked from the account, the name gets freed up and appears as deleted ingame
@@ -6894,6 +7001,49 @@ bool Player::RewardHonor(Unit* victim, uint32 groupsize, int32 honor, bool pvpto
             UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HONORABLE_KILL, 1, 0, victim);
             UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_SPECIAL_PVP_KILL, 1, 0, victim);
         }
+        //npcbot: honor for bots
+        else if (victim->IsNPCBot() && !victim->ToCreature()->IsTempBot())
+        {
+            static const float WANDERING_BOT_HONOR_GAIN_MULT = 10.0f;
+
+            if (!BotCfg::IsBotHKEnabled())
+                return false;
+
+            Creature const* bot = victim->ToCreature();
+
+            uint32 victimTeam = !bot->IsFreeBot() ? bot->GetBotOwner()->GetTeam() : BotDataMgr::GetTeamForFaction(bot->GetFaction());
+            if (GetTeam() == victimTeam && !sWorld->IsFFAPvPRealm())
+                return false;
+
+            uint8 k_level = GetLevel();
+            uint8 k_grey = Trinity::XP::GetGrayLevel(this, k_level);
+            uint8 v_level = victim->GetLevel();
+
+            if (v_level <= k_grey)
+                return false;
+
+            if (!BotCfg::IsBotHKMessageEnabled())
+                victim_guid.Clear(); // Don't show HK: <rank> message, only log.
+
+            //TODO: honor gain rate
+            honor_f = ceil(Trinity::Honor::hk_honor_at_level_f(k_level) * (v_level - k_grey) / (k_level - k_grey));
+            honor_f *= BotCfg::GetBotHKHonorRate();
+            if (bot->IsWandererBot() && !bot->GetBotBG())
+                honor_f *= WANDERING_BOT_HONOR_GAIN_MULT;
+
+            if (BotCfg::IsBotHKAchievementsEnabled())
+            {
+                ApplyModUInt32Value(PLAYER_FIELD_KILLS, 1, true);
+                ApplyModUInt32Value(PLAYER_FIELD_LIFETIME_HONORABLE_KILLS, 1, true);
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EARN_HONORABLE_KILL);
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HK_CLASS, BotMgr::GetBotPlayerClass(victim->ToCreature()));
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HK_RACE, BotMgr::GetBotPlayerRace(victim->ToCreature()));
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HONORABLE_KILL_AT_AREA, GetAreaId());
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HONORABLE_KILL, 1, 0, victim);
+                UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_SPECIAL_PVP_KILL, 1, 0, victim);
+            }
+        }
+        //end npcbot
         else
         {
             if (!victim->ToCreature()->IsRacialLeader())
@@ -8446,8 +8596,8 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
     Loot* loot;
     PermissionTypes permission = ALL_PERMISSION;
 
-    TC_LOG_DEBUG("loot", "Player::SendLoot: Player: '{}' ({}), Loot: {}",
-        GetName(), GetGUID().ToString(), guid.ToString());
+    TC_LOG_INFO("loot", "Player::SendLoot CALLED: Player: '{}' ({}), Loot: {}, loot_type={}",
+        GetName(), GetGUID().ToString(), guid.ToString(), loot_type);
     if (guid.IsGameObject())
     {
         GameObject* go = GetMap()->GetGameObject(guid);
@@ -8526,6 +8676,13 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
             if (go->GetLootMode() > 0)
                 if (GameObjectTemplateAddon const* addon = go->GetTemplateAddon())
                     loot->generateMoneyLoot(addon->Mingold, addon->Maxgold);
+            //npcbot: fill wandering bot kill reward
+            if (lootid)
+            {
+                if (go->GetEntry() == GO_BOT_MONEY_BAG)
+                    BotMgr::OnBotWandererKilled(go);
+            }
+            //end npcbot
 
             if (loot_type == LOOT_FISHING)
                 go->getFishLoot(loot, this);
@@ -8677,8 +8834,13 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
     {
         Creature* creature = GetMap()->GetCreature(guid);
 
+        // Use AOE loot range if enabled, otherwise use default INTERACTION_DISTANCE
+        float lootRange = INTERACTION_DISTANCE;
+        if (sWorld->getBoolConfig(CONFIG_AOE_LOOT_ENABLE))
+            lootRange = sWorld->getFloatConfig(CONFIG_AOE_LOOT_RANGE);
+
         // must be in range and creature must be alive for pickpocket and must be dead for another loot
-        if (!creature || creature->IsAlive() != (loot_type == LOOT_PICKPOCKETING) || !creature->IsWithinDistInMap(this, INTERACTION_DISTANCE))
+        if (!creature || creature->IsAlive() != (loot_type == LOOT_PICKPOCKETING) || !creature->IsWithinDistInMap(this, lootRange))
         {
             SendLootRelease(guid);
             return;
@@ -8829,6 +8991,18 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
 
     // need know merged fishing/corpse loot type for achievements
     loot->loot_type = loot_type;
+
+    // AOE Loot: Try to build virtual merged loot for corpses (AFTER loot_type is set)
+    if (loot_type == LOOT_CORPSE && guid.IsCreature())
+    {
+        Creature* creature = GetMap()->GetCreature(guid);
+        if (creature && !creature->IsAlive())
+        {
+            Loot* virtualLoot = BuildVirtualAOELoot(creature, this, m_session);
+            if (virtualLoot)
+                loot = virtualLoot; // Use virtual loot instead of real corpse loot
+        }
+    }
 
     if (permission != NONE_PERMISSION)
     {
@@ -18177,6 +18351,9 @@ bool Player::LoadFromDB(ObjectGuid guid, CharacterDatabaseQueryHolder const& hol
     m_achievementMgr->CheckAllAchievementCriteria();
 
     _LoadEquipmentSets(holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_EQUIPMENT_SETS));
+    //npcbots: load BotManager data
+    _botMgr->LoadData();
+    //end npcbots
 
     // @tswow-begin
     m_db_json = TSDBJson(DBJsonEntityType::PLAYER, guid);
@@ -19900,6 +20077,11 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false
     // save pet (hunter pet level and experience and all type pets health/mana).
     if (Pet* pet = GetPet())
         pet->SavePetToDB(PET_SAVE_AS_CURRENT);
+    //npcbot: save player-related npcbot data
+    BotDataMgr::SaveNpcBotStoredGear(GetGUID(), trans);
+    BotDataMgr::SaveNpcBotItemSets(GetGUID(), trans);
+    BotDataMgr::SaveNpcBotMgrData(GetGUID(), trans);
+    //end npcbot
 }
 
 // fast save function for item/money cheating preventing - save only inventory and money state
@@ -22315,6 +22497,9 @@ void Player::UpdatePvP(bool state, bool _override)
     if (!state || _override)
     {
         SetPvP(state);
+    //npcbot: update pvp flags for bots
+    _botMgr->UpdatePvPForBots();
+    //end npcbot
         pvpInfo.EndTimer = 0;
     }
     else
@@ -24212,6 +24397,11 @@ bool Player::isHonorOrXPTarget(Unit* victim) const
 
     if (Creature const* creature = victim->ToCreature())
     {
+        //npcbot: count npcbots at xp targets (DEPRECATED)
+        if (victim->ToCreature()->IsNPCBotOrPet())
+            return true;
+        //end npcbots
+
         if (creature->IsCritter() || creature->IsTotem())
             return false;
     }
@@ -27403,5 +27593,270 @@ void Player::SetSelection(ObjectGuid guid) {
     FIRE(Unit,OnSetTarget, TSUnit(this), guid.GetRawValue(), old);
 }
 
+// Stat Override System Implementation
+void Player::SetStatOverride(Stats stat, int32 value)
+{
+    if (stat >= MAX_STATS)
+        return;
+    m_overrideStats[stat] = value;
+    UpdateStats(stat);
+}
+
+int32 Player::GetStatOverride(Stats stat) const
+{
+    if (stat >= MAX_STATS)
+        return -1;
+    return m_overrideStats[stat];
+}
+
+bool Player::HasStatOverride(Stats stat) const
+{
+    if (stat >= MAX_STATS)
+        return false;
+    return m_overrideStats[stat] >= 0;
+}
+
+void Player::ClearStatOverride(Stats stat)
+{
+    if (stat >= MAX_STATS)
+        return;
+    m_overrideStats[stat] = -1;
+    UpdateStats(stat);
+}
+
+void Player::ClearAllStatOverrides()
+{
+    for (uint8 i = 0; i < MAX_STATS; ++i)
+        m_overrideStats[i] = -1;
+    m_overrideMaxHealth = -1;
+    m_overrideMaxMana = -1;
+    m_overrideManaRegen = -1.0f;
+    m_overrideAttackPower = -1;
+    m_overrideRangedAttackPower = -1;
+    m_overrideMeleeCrit = -1;
+    m_overrideRangedCrit = -1;
+    for (uint8 i = 0; i < MAX_SPELL_SCHOOL; ++i)
+        m_overrideSpellCrit[i] = -1;
+    m_overrideMeleeHit = -1;
+    m_overrideRangedHit = -1;
+    m_overrideSpellHit = -1;
+    m_overrideArmor = -1;
+    m_overrideDefense = -1;
+    m_overrideDodge = -1;
+    m_overrideParry = -1;
+    m_overrideBlock = -1;
+    m_overrideShieldBlockValue = -1;
+    m_overrideSpellPower = -1;
+    m_overrideHealingPower = -1;
+    m_overrideExpertise = -1;
+    m_overrideArmorPenetration = -1;
+    for (uint8 i = 0; i < MAX_SPELL_SCHOOL; ++i)
+        m_overrideResistances[i] = -1;
+
+    // Trigger recalculation of all stats
+    UpdateAllStats();
+}
+
+void Player::SetMaxHealthOverride(int32 value)
+{
+    m_overrideMaxHealth = value;
+    UpdateMaxHealth();
+}
+
+void Player::SetMaxManaOverride(int32 value)
+{
+    m_overrideMaxMana = value;
+    UpdateMaxPower(POWER_MANA);
+}
+
+void Player::SetManaRegenOverride(float value)
+{
+    m_overrideManaRegen = value;
+    UpdatePowerRegen(POWER_MANA);
+}
+
+void Player::SetAttackPowerOverride(int32 value)
+{
+    m_overrideAttackPower = value;
+    UpdateAttackPowerAndDamage(false);
+}
+
+void Player::SetRangedAttackPowerOverride(int32 value)
+{
+    m_overrideRangedAttackPower = value;
+    UpdateAttackPowerAndDamage(true);
+}
+
+void Player::SetMeleeCritOverride(float value)
+{
+    m_overrideMeleeCrit = static_cast<int32>(value * 100.0f);
+    UpdateAllCritPercentages();
+}
+
+void Player::SetRangedCritOverride(float value)
+{
+    m_overrideRangedCrit = static_cast<int32>(value * 100.0f);
+    UpdateCritPercentage(RANGED_ATTACK);
+}
+
+void Player::SetSpellCritOverride(uint32 school, float value)
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return;
+    m_overrideSpellCrit[school] = static_cast<int32>(value * 100.0f);
+    UpdateSpellCritChance(school);
+}
+
+float Player::GetSpellCritOverride(uint32 school) const
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return -1.0f;
+    return m_overrideSpellCrit[school] >= 0 ? m_overrideSpellCrit[school] / 100.0f : -1.0f;
+}
+
+bool Player::HasSpellCritOverride(uint32 school) const
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return false;
+    return m_overrideSpellCrit[school] >= 0;
+}
+
+void Player::ClearSpellCritOverride(uint32 school)
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return;
+    m_overrideSpellCrit[school] = -1;
+    UpdateSpellCritChance(school);
+}
+
+void Player::SetMeleeHitOverride(float value)
+{
+    m_overrideMeleeHit = static_cast<int32>(value * 100.0f);
+    UpdateMeleeHitChances();
+}
+
+void Player::SetRangedHitOverride(float value)
+{
+    m_overrideRangedHit = static_cast<int32>(value * 100.0f);
+    UpdateRangedHitChances();
+}
+
+void Player::SetSpellHitOverride(float value)
+{
+    m_overrideSpellHit = static_cast<int32>(value * 100.0f);
+    UpdateSpellHitChances();
+}
+
+void Player::SetArmorOverride(int32 value)
+{
+    m_overrideArmor = value;
+    UpdateArmor();
+}
+
+void Player::SetDefenseOverride(int32 value)
+{
+    m_overrideDefense = value;
+    UpdateDefenseBonusesMod();
+}
+
+void Player::SetDodgeOverride(float value)
+{
+    m_overrideDodge = static_cast<int32>(value * 100.0f);
+    UpdateDodgePercentage();
+}
+
+void Player::SetParryOverride(float value)
+{
+    m_overrideParry = static_cast<int32>(value * 100.0f);
+    UpdateParryPercentage();
+}
+
+void Player::SetBlockOverride(float value)
+{
+    m_overrideBlock = static_cast<int32>(value * 100.0f);
+    UpdateBlockPercentage();
+}
+
+void Player::SetShieldBlockValueOverride(int32 value)
+{
+    m_overrideShieldBlockValue = value;
+    UpdateShieldBlockValue();
+}
+
+void Player::SetSpellPowerOverride(int32 value)
+{
+    m_overrideSpellPower = value;
+    UpdateSpellDamageAndHealingBonus();
+}
+
+void Player::SetHealingPowerOverride(int32 value)
+{
+    m_overrideHealingPower = value;
+    UpdateSpellDamageAndHealingBonus();
+}
+
+void Player::SetExpertiseOverride(int32 value)
+{
+    m_overrideExpertise = value;
+    UpdateExpertise(BASE_ATTACK);
+    UpdateExpertise(OFF_ATTACK);
+}
+
+void Player::SetArmorPenetrationOverride(int32 value)
+{
+    m_overrideArmorPenetration = value;
+    UpdateArmorPenetration(0);
+}
+
+void Player::SetResistanceOverride(uint32 school, int32 value)
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return;
+    m_overrideResistances[school] = value;
+    UpdateResistances(school);
+}
+
+int32 Player::GetResistanceOverride(uint32 school) const
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return -1;
+    return m_overrideResistances[school];
+}
+
+bool Player::HasResistanceOverride(uint32 school) const
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return false;
+    return m_overrideResistances[school] >= 0;
+}
+
+void Player::ClearResistanceOverride(uint32 school)
+{
+    if (school >= MAX_SPELL_SCHOOL)
+        return;
+    m_overrideResistances[school] = -1;
+    UpdateResistances(school);
+}
+
+//npcbot
+bool Player::HaveBot() const
+{
+    return _botMgr && _botMgr->HaveBot();
+}
+uint8 Player::GetNpcBotsCount() const
+{
+    return _botMgr ? _botMgr->GetNpcBotsCount() : 0;
+}
+void Player::RemoveAllBots(uint8 removetype)
+{
+    if (_botMgr)
+        _botMgr->RemoveAllBots(removetype);
+}
+void Player::UpdatePhaseForBots()
+{
+    if (_botMgr)
+        _botMgr->UpdatePhaseForBots();
+}
+//end npcbot
 
 // @tswow-end

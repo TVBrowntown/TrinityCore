@@ -225,6 +225,7 @@ public:
     float     ValueMultiplier;
     float     DamageMultiplier;
     float     BonusMultiplier;
+    float     BonusCoefficient; // NPCBots compat - spell bonus coefficient
     int32     MiscValue;
     int32     MiscValueB;
     Mechanics Mechanic;
@@ -239,11 +240,18 @@ public:
 
     SpellEffectInfo();
     explicit SpellEffectInfo(SpellEntry const* spellEntry, SpellInfo const* spellInfo, uint8 effIndex);
-    SpellEffectInfo(SpellEffectInfo const&) = delete;
+    //npcbot - allow copy for spell info overrides
+    SpellEffectInfo(SpellEffectInfo const&) = default;
+    //end npcbot
     SpellEffectInfo(SpellEffectInfo&&) noexcept;
-    SpellEffectInfo& operator=(SpellEffectInfo const&) = delete;
+    //npcbot - allow copy for spell info overrides
+    SpellEffectInfo& operator=(SpellEffectInfo const&) = default;
+    //end npcbot
     SpellEffectInfo& operator=(SpellEffectInfo&&) noexcept;
     ~SpellEffectInfo();
+    //npcbot
+    void OverrideSpellInfo(SpellInfo const* spellInfo) { ASSERT_NOTNULL(spellInfo); _spellInfo = spellInfo; }
+    //end npcbot
 
     bool IsEffect() const;
     bool IsEffect(SpellEffects effectName) const;
@@ -278,7 +286,10 @@ private:
     };
     static std::array<StaticData, TOTAL_SPELL_EFFECTS> _data;
 
-    std::unique_ptr<ImmunityInfo> _immunityInfo;
+    //npcbot
+    //std::unique_ptr<ImmunityInfo> _immunityInfo;
+    std::shared_ptr<ImmunityInfo> _immunityInfo;
+    //end npcbot
 };
 
 struct TC_GAME_API SpellDiminishInfo
@@ -509,6 +520,9 @@ class TC_GAME_API SpellInfo
         uint32 GetAllowedMechanicMask() const;
 
         uint32 GetMechanicImmunityMask(Unit* caster) const;
+        //npcbot
+        SpellInfo const* TryGetSpellInfoOverride(WorldObject const* caster) const;
+        //end npcbot
 
     private:
         // loading helpers

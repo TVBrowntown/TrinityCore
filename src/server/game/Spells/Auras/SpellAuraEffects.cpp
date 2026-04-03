@@ -43,6 +43,10 @@
 #include "Vehicle.h"
 #include "WorldPacket.h"
 #include <numeric>
+//npcbot
+#include "botconfig.h"
+#include "botmgr.h"
+//end npcbot
 // @tswow-begin
 #include "TSAura.h"
 #include "TSEvents.h"
@@ -872,6 +876,16 @@ void AuraEffect::PeriodicTick(AuraApplication* aurApp, Unit* caster) const
         return;
 
     Unit* target = aurApp->GetTarget();
+    //npcbot: handle for bots
+    if (target->IsAlive() && target->GetTypeId() == TYPEID_UNIT &&
+        target->ToCreature()->IsNPCBotOrPet())
+    {
+        Unit* caster = GetCaster();
+        if (caster && caster->IsAlive())
+            caster->GetThreatManager().UpdateMyTempModifiers();
+        return;
+    }
+    //end npcbot
 
     // Update serverside orientation of tracking channeled auras on periodic update ticks
     // exclude players because can turn during channeling and shouldn't desync orientation client/server
@@ -1124,6 +1138,10 @@ void AuraEffect::HandleShapeshiftBoosts(Unit* target, bool apply) const
             spellId = 7376;
             break;
         case FORM_BERSERKERSTANCE:
+                //npcbot: skip this, handled inside class ai
+                if (target->IsNPCBot())
+                    break;
+                //end npcbot
             spellId = 7381;
             break;
         case FORM_MOONKIN:
@@ -1885,6 +1903,10 @@ void AuraEffect::HandleAuraModShapeshift(AuraApplication const* aurApp, uint8 mo
 
     if (target->GetTypeId() == TYPEID_PLAYER)
         target->ToPlayer()->InitDataForForm();
+    //npcbot: skip bots (handled inside AI)
+    else if (target->GetTypeId() == TYPEID_UNIT && target->ToCreature()->IsNPCBotOrPet())
+    {}
+    //end npcbot
     else
         target->UpdateDisplayPower();
 
@@ -1898,6 +1920,11 @@ void AuraEffect::HandleAuraModShapeshift(AuraApplication const* aurApp, uint8 mo
         // If druid shifts while being disarmed we need to deal with that since forms aren't affected by disarm
         // and also HandleAuraModDisarm is not triggered
         if (!target->CanUseAttackType(BASE_ATTACK))
+            //npcbot: skip bots (handled inside AI)
+            if (target->GetTypeId() == TYPEID_UNIT && target->ToCreature()->IsNPCBotOrPet())
+            {}
+            else
+            //end npcbot
         {
             if (Item* pItem = target->ToPlayer()->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
                 target->ToPlayer()->_ApplyWeaponDamage(EQUIPMENT_SLOT_MAINHAND, pItem->GetTemplate(), apply);
@@ -3156,6 +3183,16 @@ void AuraEffect::HandleAuraModEffectImmunity(AuraApplication const* aurApp, uint
         }
         else
             sOutdoorPvPMgr->HandleDropFlag(player, GetSpellInfo()->Id);
+    //npcbot
+    if (Creature* bot = target->ToCreature())
+    {
+        if (!apply && bot->IsNPCBot() && (GetSpellInfo()->AuraInterruptFlags & AURA_INTERRUPT_FLAG_IMMUNE_OR_LOST_SELECTION))
+        {
+            if (Battleground* botbg = bot->GetBotBG())
+                botbg->EventBotDroppedFlag(bot);
+        }
+    }
+    //end npcbot
     }
 }
 
@@ -5041,6 +5078,10 @@ void AuraEffect::HandlePeriodicTriggerSpellAuraTick(Unit* target, Unit* caster) 
 
     if (SpellInfo const* triggeredSpellInfo = sSpellMgr->GetSpellInfo(triggerSpellId))
     {
+        //npcbot: override spellInfo
+        triggeredSpellInfo = triggeredSpellInfo->TryGetSpellInfoOverride(caster);
+        //end npcbot
+
         if (Unit* triggerCaster = triggeredSpellInfo->NeedsToBeTriggeredByCaster(m_spellInfo) ? caster : target)
         {
             triggerCaster->CastSpell(target, triggerSpellId, this);
@@ -5062,6 +5103,10 @@ void AuraEffect::HandlePeriodicTriggerSpellWithValueAuraTick(Unit* target, Unit*
 
     if (SpellInfo const* triggeredSpellInfo = sSpellMgr->GetSpellInfo(triggerSpellId))
     {
+        //npcbot: override spellInfo
+        triggeredSpellInfo = triggeredSpellInfo->TryGetSpellInfoOverride(caster);
+        //end npcbot
+
         if (Unit* triggerCaster = triggeredSpellInfo->NeedsToBeTriggeredByCaster(m_spellInfo) ? caster : target)
         {
             CastSpellExtraArgs args(this);
@@ -5111,6 +5156,13 @@ void AuraEffect::HandlePeriodicDamageAurasTick(Unit* target, Unit* caster) const
 
     if (GetAuraType() == SPELL_AURA_PERIODIC_DAMAGE)
     {
+        //npcbot: Black Arrow damage on targets below 20%
+        if (GetSpellInfo()->SpellFamilyName == SPELLFAMILY_WARLOCK && (GetSpellInfo()->SpellFamilyFlags[1] & 0x4) &&
+            target->HasAuraState(AURA_STATE_HEALTHLESS_20_PERCENT))
+        {
+            damage *= 5;
+        }
+        //end npcbot
         // leave only target depending bonuses, rest is handled in calculate amount
         if (GetBase()->GetType() == DYNOBJ_AURA_TYPE)
             damage = caster->SpellDamageBonusDone(target, GetSpellInfo(), damage, DOT, GetSpellEffectInfo(), { }, GetBase()->GetStackAmount());
@@ -5682,6 +5734,9 @@ void AuraEffect::HandleProcTriggerSpellAuraProc(AuraApplication* aurApp, ProcEve
     if (SpellInfo const* triggeredSpellInfo = sSpellMgr->GetSpellInfo(triggerSpellId))
     {
         TC_LOG_DEBUG("spells.aura.effect", "AuraEffect::HandleProcTriggerSpellAuraProc: Triggering spell {} from aura {} proc", triggeredSpellInfo->Id, GetId());
+        //npcbot: override spellInfo
+        triggeredSpellInfo = triggeredSpellInfo->TryGetSpellInfoOverride(aurApp->GetBase()->GetCaster());
+        //end npcbot
         triggerCaster->CastSpell(triggerTarget, triggeredSpellInfo->Id, this);
     }
     else
@@ -5702,6 +5757,10 @@ void AuraEffect::HandleProcTriggerSpellWithValueAuraProc(AuraApplication* aurApp
 
     if (SpellInfo const* triggeredSpellInfo = sSpellMgr->GetSpellInfo(triggerSpellId))
     {
+        //npcbot: override spellInfo
+        triggeredSpellInfo = triggeredSpellInfo->TryGetSpellInfoOverride(aurApp->GetBase()->GetCaster());
+        //end npcbot
+
         CastSpellExtraArgs args(this);
         args.AddSpellMod(SPELLVALUE_BASE_POINT0, GetAmount());
         triggerCaster->CastSpell(triggerTarget, triggerSpellId, args);

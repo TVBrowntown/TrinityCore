@@ -62,6 +62,10 @@
 #include "World.h"
 #include "DBCStores.h"
 
+//npcbot
+#include "botdatamgr.h"
+//end npcbot
+
 ScriptMapMap sSpellScripts;
 ScriptMapMap sEventScripts;
 ScriptMapMap sWaypointScripts;
@@ -1267,6 +1271,11 @@ void ObjectMgr::CheckCreatureTemplate(CreatureTemplate const* cInfo)
         TC_LOG_ERROR("sql.sql", "Table `creature_template` lists creature (Entry: {}) with expansion {}. Ignored and set to 0.", cInfo->Entry, cInfo->expansion);
         const_cast<CreatureTemplate*>(cInfo)->expansion = 0;
     }
+
+    //npcbot: skip flags check and damage multiplier
+    if (cInfo->IsNPCBotOrPet())
+        return;
+    //end npcbot
 
     if (uint32 badFlags = (cInfo->flags_extra & ~CREATURE_FLAG_EXTRA_DB_ALLOWED))
     {
@@ -11207,6 +11216,18 @@ GameObjectOverride const* ObjectMgr::GetGameObjectOverride(ObjectGuid::LowType s
 
 CreatureTemplate const* ObjectMgr::GetCreatureTemplate(uint32 entry) const
 {
+    //npcbot: try fetch custom creature template
+    if (entry >= BOT_ENTRY_CREATE_BEGIN)
+    {
+        if (CreatureTemplate const* extra_template = BotDataMgr::GetBotExtraCreatureTemplate(entry))
+        {
+            //custom creature template should only exist in custom container
+            ASSERT_NODEBUGINFO(_creatureTemplateStore.find(entry) == _creatureTemplateStore.end());
+            return extra_template;
+        }
+    }
+    //end npcbot
+
     return Trinity::Containers::MapGetValuePtr(_creatureTemplateStore, entry);
 }
 

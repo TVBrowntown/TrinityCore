@@ -54,6 +54,9 @@ namespace Trinity
 
     namespace XP
     {
+        // NPCBots compat: overload without Player* for bot AI
+        inline uint8 GetGrayLevel(uint8 pl_level);
+
         // @tswow-begin add player argument
         inline uint8 GetGrayLevel(Player* player, uint8 pl_level)
         // @tswow-end
@@ -78,6 +81,12 @@ namespace Trinity
                 );
             // @tswow-end
             return level;
+        }
+
+        // NPCBots compat: overload without Player*
+        inline uint8 GetGrayLevel(uint8 pl_level)
+        {
+            return GetGrayLevel(nullptr, pl_level);
         }
 
         // @tswow-begin player/creature arguments

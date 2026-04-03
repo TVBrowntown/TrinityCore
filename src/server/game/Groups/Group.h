@@ -192,6 +192,16 @@ class TC_GAME_API Group
         bool Create(Player* leader);
         void LoadGroupFromDB(Field* field);
         void LoadMemberFromDB(ObjectGuid::LowType guidLow, uint8 memberFlags, uint8 subgroup, uint8 roles);
+        //npcbot
+        bool Create(Creature* leader);
+        bool AddMember(Creature* creature);
+        void LoadCreatureMemberFromDB(uint32 entry, uint8 memberFlags, uint8 subgroup, uint8 roles);
+        void UpdateBotOutOfRange(Creature* creature);
+        void LinkBotMember(GroupBotReference* bRef);
+        void DelinkBotMember(ObjectGuid guid);
+        GroupBotReference* GetFirstBotMember() { return m_botMemberMgr.getFirst(); }
+        GroupBotReference const* GetFirstBotMember() const { return m_botMemberMgr.getFirst(); }
+        //end npcbot
         bool AddInvite(Player* player);
         void RemoveInvite(Player* player);
         void RemoveAllInvites();
@@ -215,6 +225,8 @@ class TC_GAME_API Group
         bool isBGGroup()   const;
         bool isBFGroup()   const;
         bool IsCreated()   const;
+        bool IsCrossFactionLFG() const;
+        void SetCrossFactionLFG(bool crossFaction);
         ObjectGuid GetLeaderGUID() const;
         ObjectGuid GetGUID() const;
         ObjectGuid::LowType GetLowGUID() const;
@@ -249,6 +261,7 @@ class TC_GAME_API Group
         GroupReference const* GetFirstMember() const { return m_memberMgr.getFirst(); }
         uint32 GetMembersCount() const { return m_memberSlots.size(); }
         uint32 GetInviteeCount() const { return m_invitees.size(); }
+        GroupType GetGroupType() const { return m_groupType; }
 
         uint8 GetMemberGroup(ObjectGuid guid) const;
 
@@ -339,6 +352,10 @@ class TC_GAME_API Group
         // FG: evil hacks
         void BroadcastGroupUpdate(void);
 
+        //npcbots
+        ObjectGuid const* GetTargetIcons() const { return m_targetIcons; }
+        //end npcbots
+
         Trinity::unique_weak_ptr<Group> GetWeakPtr() const { return m_scriptRef; }
 
     protected:
@@ -354,6 +371,9 @@ class TC_GAME_API Group
 
         MemberSlotList      m_memberSlots;
         GroupRefManager     m_memberMgr;
+        //npcbot
+        GroupBotRefManager  m_botMemberMgr;
+        //end npcbot
         InvitesList         m_invitees;
         ObjectGuid          m_leaderGuid;
         std::string         m_leaderName;
@@ -376,6 +396,7 @@ class TC_GAME_API Group
         uint32              m_dbStoreId;                    // Represents the ID used in database (Can be reused by other groups if group was disbanded)
         bool                m_isLeaderOffline;
         TimeTracker         m_leaderOfflineTimer;
+        bool                m_isCrossFactionLFG;            // Flag for cross-faction LFG groups
 
         struct NoopGroupDeleter { void operator()(Group*) const { /*noop - not managed*/ } };
         Trinity::unique_trackable_ptr<Group> m_scriptRef;

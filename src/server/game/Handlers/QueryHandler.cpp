@@ -30,9 +30,54 @@
 #include "QueryPackets.h"
 #include "UpdateMask.h"
 #include "World.h"
+//npcbot
+#include "CreatureData.h"
+#include "botdatamgr.h"
+#include "botmgr.h"
+//end npcbot
 
 void WorldSession::SendNameQueryOpcode(ObjectGuid guid)
 {
+    //npcbot: try query bot info
+    if (guid.IsCreature())
+    {
+        uint32 creatureId = guid.GetEntry();
+        CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureId);
+
+        WorldPacket data(SMSG_NAME_QUERY_RESPONSE, (8+1+1+1+1+1+10));
+        data << guid.WriteAsPacked();
+
+        if (creatureTemplate && creatureTemplate->IsNPCBot())
+        {
+            std::string creatureName(creatureTemplate->Name);
+            if (CreatureLocale const* creatureInfo = sObjectMgr->GetCreatureLocale(creatureId))
+            {
+                uint32 loc = GetSessionDbLocaleIndex();
+                if (creatureInfo->Name.size() > loc && !creatureInfo->Name[loc].empty())
+                    creatureName = creatureInfo->Name[loc];
+            }
+
+            NpcBotExtras const* extData = ASSERT_NOTNULL(BotDataMgr::SelectNpcBotExtras(creatureId));
+            NpcBotAppearanceData const* appData = BotDataMgr::SelectNpcBotAppearance(creatureId);
+
+            data << uint8(0);                                                              // name known
+            data << creatureName;                                                          // name
+            data << uint8(0);                                                              // realm name
+            data << uint8(BotMgr::GetBotPlayerRace(extData->bclass, extData->race));       // race
+            data << uint8(appData ? appData->gender : static_cast<uint8>(GENDER_MALE));    // gender
+            data << uint8(BotMgr::GetBotPlayerClass(extData->bclass));                     // class
+            data << uint8(0);                                                              // name not declined
+        }
+        else
+        {
+            data << uint8(1);                           // name unknown
+        }
+
+        SendPacket(&data);
+        return;
+    }
+    //end npcbot
+
     Player* player = ObjectAccessor::FindConnectedPlayer(guid);
     CharacterCacheEntry const* nameData = sCharacterCache->GetCharacterCacheByGuid(guid);
 

@@ -215,6 +215,9 @@ struct TC_GAME_API Loot
     NotNormalLootItemMap const& GetPlayerFFAItems() const { return PlayerFFAItems; }
     NotNormalLootItemMap const& GetPlayerNonQuestNonFFAConditionalItems() const { return PlayerNonQuestNonFFAConditionalItems; }
 
+    // Non-const accessor for AOE loot to manually populate quest items
+    NotNormalLootItemMap& GetPlayerQuestItemsNonConst() { return PlayerQuestItems; }
+
     std::vector<LootItem> items;
     std::vector<LootItem> quest_items;
     uint32 gold;
@@ -231,8 +234,18 @@ struct TC_GAME_API Loot
     //  Only set for inventory items that can be right-click looted
     uint32 containerID;
 
+    // AOE Loot: Back-reference to owner creature for real-time updates
+    Creature* m_ownerCreature;
+
+    // AOE Loot: Mutex to prevent double-loot race condition
+    std::mutex m_lootMutex;
+
     Loot(uint32 _gold = 0);
     ~Loot();
+
+    void SetOwnerCreature(Creature* creature) { m_ownerCreature = creature; }
+    Creature* GetOwnerCreature() const { return m_ownerCreature; }
+    void NotifyAOEViewers(uint8 realSlot);
 
     // if loot becomes invalid this reference is used to inform the listener
     void addLootValidatorRef(LootValidatorRef* pLootValidatorRef)
@@ -263,8 +276,10 @@ struct TC_GAME_API Loot
     bool hasItemFor(Player const* player) const;
     bool hasOverThresholdItem() const;
 
+    // Made public for AOE loot - needed to populate PlayerQuestItems for virtual loot
+    void FillNotNormalLootFor(Player* player, bool presentAtLooting);
+
     private:
-        void FillNotNormalLootFor(Player* player, bool presentAtLooting);
         NotNormalLootItemList* FillFFALoot(Player* player);
         NotNormalLootItemList* FillQuestLoot(Player* player);
         NotNormalLootItemList* FillNonQuestNonFFAConditionalLoot(Player* player, bool presentAtLooting);

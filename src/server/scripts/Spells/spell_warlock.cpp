@@ -271,8 +271,15 @@ class spell_warl_curse_of_doom : public AuraScript
         if (removeMode != AURA_REMOVE_BY_DEATH || !IsExpired())
             return;
 
-        if (GetCaster()->ToPlayer()->isHonorOrXPTarget(GetTarget()))
+        //npcbot: handle non-player casters
+        if (Player* player = GetCaster()->ToPlayer())
+        {
+            if (player->isHonorOrXPTarget(GetTarget()))
+                GetCaster()->CastSpell(GetTarget(), SPELL_WARLOCK_CURSE_OF_DOOM_EFFECT, aurEff);
+        }
+        else if (GetCaster()->IsNPCBot())
             GetCaster()->CastSpell(GetTarget(), SPELL_WARLOCK_CURSE_OF_DOOM_EFFECT, aurEff);
+        //end npcbot
     }
 
     void Register() override
@@ -713,6 +720,10 @@ class spell_warl_life_tap : public SpellScript
 
     bool Load() override
     {
+        //npcbot
+        if (GetCaster()->IsNPCBot())
+            return true;
+        //end npcbot
         return GetCaster()->GetTypeId() == TYPEID_PLAYER;
     }
 
@@ -723,6 +734,11 @@ class spell_warl_life_tap : public SpellScript
 
     void HandleDummy(SpellEffIndex effIndex)
     {
+        //npcbot: skip - handled inside class AI
+        if (GetCaster()->IsNPCBot())
+            return;
+        //end npcbot
+
         Unit* caster = GetCaster();
         int32 base = GetEffectInfo(effIndex).CalcValue();
 

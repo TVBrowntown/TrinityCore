@@ -202,6 +202,17 @@ void FollowMovementGenerator::UpdatePetSpeed(Unit* owner)
         {
             oPet->UpdateSpeed(MOVE_RUN);
             oPet->UpdateSpeed(MOVE_WALK);
+    //npcbot
+    if (owner->IsNPCBotPet())
+    {
+        if (GetTarget() && (GetTarget()->GetGUID() == owner->GetOwnerGUID() || GetTarget()->GetGUID() == owner->GetCreatorGUID()))
+        {
+            owner->UpdateSpeed(MOVE_RUN);
+            owner->UpdateSpeed(MOVE_WALK);
+            owner->UpdateSpeed(MOVE_SWIM);
+        }
+    }
+    //end npcbot
             oPet->UpdateSpeed(MOVE_SWIM);
         }
     }

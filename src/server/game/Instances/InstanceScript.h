@@ -211,6 +211,12 @@ class TC_GAME_API InstanceScript : public ZoneScript
         // Called when a player successfully enters the instance.
         virtual void OnPlayerEnter(Player* /*player*/);
         // Called when a player successfully leaves the instance.
+        //npcbot: map hooks
+        virtual void OnNPCBotEnter(Creature* /*bot*/) { }
+        virtual void OnNPCBotLeave(Creature* /*bot*/) { }
+        void DoRemoveAurasDueToSpellOnNPCBot(Creature* bot, uint32 spell);
+        void DoCastSpellOnNPCBot(Creature* bot, uint32 spell);
+        //end npcbot
         virtual void OnPlayerLeave(Player* /*player*/);
         // @tswow-end
 

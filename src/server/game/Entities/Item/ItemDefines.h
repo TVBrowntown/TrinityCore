@@ -41,6 +41,7 @@ enum InventoryResult : uint8
     EQUIP_ERR_ITEM_DOESNT_GO_INTO_BAG            = 15,
     EQUIP_ERR_ITEM_DOESNT_GO_INTO_BAG2           = 16,
     EQUIP_ERR_CANT_CARRY_MORE_OF_THIS            = 17,
+    EQUIP_ERR_ITEM_MAX_COUNT                     = 17, // NPCBots compat alias
     EQUIP_ERR_NO_EQUIPMENT_SLOT_AVAILABLE3       = 18,
     EQUIP_ERR_ITEM_CANT_STACK                    = 19,
     EQUIP_ERR_ITEM_CANT_BE_EQUIPPED              = 20,
@@ -74,6 +75,7 @@ enum InventoryResult : uint8
     EQUIP_ERR_BAGS_CANT_BE_WRAPPED               = 48,
     EQUIP_ERR_ALREADY_LOOTED                     = 49,
     EQUIP_ERR_INVENTORY_FULL                     = 50,
+    EQUIP_ERR_INV_FULL                           = 50, // NPCBots compat alias
     EQUIP_ERR_BANK_FULL                          = 51,
     EQUIP_ERR_ITEM_IS_CURRENTLY_SOLD_OUT         = 52,
     EQUIP_ERR_BAG_FULL3                          = 53,

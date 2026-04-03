@@ -364,7 +364,9 @@ enum ItemSubclassWeapon
     ITEM_SUBCLASS_WEAPON_EXOTIC                 = 11,
     ITEM_SUBCLASS_WEAPON_EXOTIC2                = 12,
     ITEM_SUBCLASS_WEAPON_FIST                   = 13,
+    ITEM_SUBCLASS_WEAPON_FIST_WEAPON            = 13, // NPCBots compat alias
     ITEM_SUBCLASS_WEAPON_MISC                   = 14,
+    ITEM_SUBCLASS_WEAPON_MISCELLANEOUS          = 14, // NPCBots compat alias
     ITEM_SUBCLASS_WEAPON_DAGGER                 = 15,
     ITEM_SUBCLASS_WEAPON_THROWN                 = 16,
     ITEM_SUBCLASS_WEAPON_SPEAR                  = 17,
@@ -397,6 +399,7 @@ enum ItemSubclassGem
 enum ItemSubclassArmor
 {
     ITEM_SUBCLASS_ARMOR_MISC                    = 0,
+    ITEM_SUBCLASS_ARMOR_MISCELLANEOUS           = 0, // NPCBots compat alias
     ITEM_SUBCLASS_ARMOR_CLOTH                   = 1,
     ITEM_SUBCLASS_ARMOR_LEATHER                 = 2,
     ITEM_SUBCLASS_ARMOR_MAIL                    = 3,

@@ -34,6 +34,11 @@
 #include "Vehicle.h"
 #include "World.h"
 #include "WorldPacket.h"
+//npcbot: try query bot name
+#include "CreatureData.h"
+#include "botdatamgr.h"
+#include "botmgr.h"
+//end npcbot
 
 class Aura;
 
@@ -97,10 +102,26 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Party::PartyInviteClien
     }
 
     // can't group with
-    if (!invitingPlayer->IsGameMaster() && !sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP) && invitingPlayer->GetTeam() != invitedPlayer->GetTeam())
+    if (!invitingPlayer->IsGameMaster() && invitingPlayer->GetTeam() != invitedPlayer->GetTeam())
     {
-        SendPartyResult(PARTY_OP_INVITE, packet.TargetName, ERR_PLAYER_WRONG_FACTION);
-        return;
+        // Allow cross-faction if general cross-faction is enabled OR if dungeon finder cross-faction is enabled
+        // But dungeon finder cross-faction only allows groups formed through LFG, not manual invites
+        if (!sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP))
+        {
+            // If only dungeon finder cross-faction is enabled, block manual invites
+            if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_DUNGEON_FINDER))
+            {
+                SendPartyResult(PARTY_OP_INVITE, packet.TargetName, ERR_PLAYER_WRONG_FACTION);
+                return;
+            }
+            // Neither is enabled, block cross-faction invites
+            else
+            {
+                SendPartyResult(PARTY_OP_INVITE, packet.TargetName, ERR_PLAYER_WRONG_FACTION);
+                return;
+            }
+        }
+        // CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP is enabled, allow the invite
     }
     if (invitingPlayer->GetInstanceId() != 0 && invitedPlayer->GetInstanceId() != 0 && invitingPlayer->GetInstanceId() != invitedPlayer->GetInstanceId() && invitingPlayer->GetMapId() == invitedPlayer->GetMapId())
     {
@@ -285,6 +306,31 @@ void WorldSession::HandleGroupUninviteGuidOpcode(WorldPacket& recvData)
     ObjectGuid guid;
     std::string reason;
     recvData >> guid;
+    //npcbot: try send bot group member info
+    if (guid.IsCreature())
+    {
+        if (!GetPlayer()->GetGroup() || !GetPlayer()->GetGroup()->IsMember(guid))
+        {
+            WorldPacket data(SMSG_PARTY_MEMBER_STATS_FULL, 3+4+2);
+            data << uint8(0);
+            data << guid.WriteAsPacked();
+            data << uint32(GROUP_UPDATE_FLAG_STATUS);
+            data << uint16(MEMBER_STATUS_OFFLINE);
+            SendPacket(&data);
+            return;
+        }
+
+        uint32 creatureId = guid.GetEntry();
+        CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureId);
+        if (creatureTemplate && creatureTemplate->IsNPCBot())
+        {
+            WorldPacket bpdata(SMSG_PARTY_MEMBER_STATS_FULL, 4+2+2+2+1+2*6+8+1+8);
+            BotMgr::BuildBotPartyMemberStatsPacket(guid, &bpdata);
+            SendPacket(&bpdata);
+            return;
+        }
+    }
+    //end npcbot
     recvData >> reason;
 
     //can't uninvite yourself
@@ -609,6 +655,13 @@ void WorldSession::HandleGroupChangeSubGroupOpcode(WorldPacket& recvData)
         guid = movedPlayer->GetGUID();
     else
         guid = sCharacterCache->GetCharacterGuidByName(name);
+    //npcbot
+    if (guid.IsEmpty())
+    {
+        if (Creature const* bot = BotDataMgr::FindBot(name, GetSessionDbcLocale()))
+            guid = bot->GetGUID();
+    }
+    //end npcbot
 
     if (guid.IsEmpty())
         return;

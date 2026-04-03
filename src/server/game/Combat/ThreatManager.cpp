@@ -41,6 +41,10 @@
 // @tswow-end
 #include <boost/heap/fibonacci_heap.hpp>
 
+//npcbot
+#include "botmgr.h"
+//end npcbot
+
 const CompareThreatLessThan ThreatManager::CompareThreat;
 
 class ThreatManager::Heap : public boost::heap::fibonacci_heap<ThreatReference const*, boost::heap::compare<CompareThreatLessThan>>
@@ -100,6 +104,13 @@ void ThreatReference::UpdateOffline()
         if (b->HasUnitFlag(UNIT_FLAG_IMMUNE_TO_PC))
             return false;
     }
+    //npcbot
+    else if (a->IsNPCBotOrPet())
+    {
+        if (b->HasUnitFlag(UNIT_FLAG_IMMUNE_TO_PC))
+            return false;
+    }
+    //end npcbot
     else
     {
         if (b->HasUnitFlag(UNIT_FLAG_IMMUNE_TO_NPC))
@@ -197,6 +208,11 @@ void ThreatReference::HeapNotifyDecreased()
         if (TempSummon const* tWho = cWho->ToTempSummon())
             if (tWho->GetSummonerGUID().IsPlayer())
                 return false;
+
+    //npcbot - npcbots and their pets cannot have threatlist
+    if (cWho->IsNPCBot() || cWho->IsNPCBotPet())
+        return false;
+    //end npcbot
 
     return true;
 }
@@ -719,6 +735,11 @@ void ThreatManager::ProcessAIUpdates()
 
         if (Player* modOwner = victim->GetSpellModOwner())
             modOwner->ApplySpellMod(spell->Id, SPELLMOD_THREAT, threat);
+
+        //npcbot: threat mods
+        if (victim->GetTypeId() == TYPEID_UNIT && victim->ToCreature()->GetBotAI())
+            BotMgr::ApplyBotThreatMods(victim, spell, threat);
+        //end npcbot
     }
 
     // modifiers by effect school

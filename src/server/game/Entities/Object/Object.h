@@ -174,6 +174,11 @@ class TC_GAME_API Object
 
         // FG: some hacky helpers
         void ForceValuesUpdateAtIndex(uint32);
+        //npcbot
+        virtual bool IsNPCBot() const { return false; }
+        virtual bool IsNPCBotPet() const { return false; }
+        virtual bool IsNPCBotOrPet() const { return false; }
+        //end npcbot
 
         inline bool IsWorldObject() const { return isType(TYPEMASK_WORLDOBJECT); }
         static WorldObject* ToWorldObject(Object* o) { return o ? o->ToWorldObject() : nullptr; }
@@ -333,11 +338,11 @@ class TC_GAME_API WorldObject : public Object, public WorldLocation
         void GetNearPoint2D(WorldObject const* searcher, float& x, float& y, float distance, float absAngle) const;
         void GetNearPoint(WorldObject const* searcher, float& x, float& y, float& z, float distance2d, float absAngle) const;
         void GetClosePoint(float& x, float& y, float& z, float size, float distance2d = 0, float relAngle = 0) const;
-        void MovePosition(Position &pos, float dist, float angle);
-        Position GetNearPosition(float dist, float angle);
-        void MovePositionToFirstCollision(Position &pos, float dist, float angle);
-        Position GetFirstCollisionPosition(float dist, float angle);
-        Position GetRandomNearPosition(float radius);
+        void MovePosition(Position &pos, float dist, float angle) const;
+        Position GetNearPosition(float dist, float angle) const;
+        void MovePositionToFirstCollision(Position &pos, float dist, float angle) const;
+        Position GetFirstCollisionPosition(float dist, float angle) const;
+        Position GetRandomNearPosition(float radius) const;
         void GetContactPoint(WorldObject const* obj, float& x, float& y, float& z, float distance2d = CONTACT_DISTANCE) const;
 
         virtual float GetCombatReach() const { return 0.0f; } // overridden (only) in Unit

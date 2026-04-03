@@ -25,11 +25,17 @@
 #include "Log.h"
 #include "LootItemStorage.h"
 #include "LootMgr.h"
+#include "AOELoot.h"
 #include "Map.h"
 #include "Object.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "WorldPacket.h"
+#include "World.h"
+//npcbot
+#include "botconfig.h"
+#include "botmgr.h"
+//end npcbot
 
 void WorldSession::HandleAutostoreLootItemOpcode(WorldPacket& recvData)
 {
@@ -82,7 +88,13 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPacket& recvData)
         Creature* creature = GetPlayer()->GetMap()->GetCreature(lguid);
 
         bool lootAllowed = creature && creature->IsAlive() == (player->GetClass() == CLASS_ROGUE && creature->loot.loot_type == LOOT_PICKPOCKETING);
-        if (!lootAllowed || !creature->IsWithinDistInMap(_player, INTERACTION_DISTANCE))
+
+        // Use AOE loot range if enabled, otherwise use default INTERACTION_DISTANCE
+        float lootRange = INTERACTION_DISTANCE;
+        if (sWorld->getBoolConfig(CONFIG_AOE_LOOT_ENABLE))
+            lootRange = sWorld->getFloatConfig(CONFIG_AOE_LOOT_RANGE);
+
+        if (!lootAllowed || !creature->IsWithinDistInMap(_player, lootRange))
         {
             player->SendLootError(lguid, lootAllowed ? LOOT_ERROR_TOO_FAR : LOOT_ERROR_DIDNT_KILL);
             return;
@@ -91,6 +103,235 @@ void WorldSession::HandleAutostoreLootItemOpcode(WorldPacket& recvData)
         loot = &creature->loot;
     }
 
+    // AOE Loot: Dual-path approach - regular items use virtual loot, quest items use real corpses
+    Loot* virtualLoot = GetVirtualAOELoot();
+    std::vector<AOELootSlotMapping>* slotMap = GetAOESlotMap();
+    std::set<ObjectGuid>* involvedCorpses = GetAOEInvolvedCorpses();
+
+    if (virtualLoot && slotMap && involvedCorpses)
+    {
+        // Security: Validate slot index doesn't exceed displayed limit
+        const uint8 MAX_DISPLAYED_ITEMS = 18;
+        if (lootSlot >= MAX_DISPLAYED_ITEMS)
+        {
+            player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+            return;
+        }
+
+        // PATH 1: Regular items (slots 0 to virtualLoot->items.size()-1)
+        if (lootSlot < virtualLoot->items.size())
+        {
+            // Security: Validate slot mapping exists
+            if (lootSlot >= slotMap->size())
+            {
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            const AOELootSlotMapping& mapping = (*slotMap)[lootSlot];
+
+            // Security: Validate mapping is still valid
+            if (!mapping.isValid)
+            {
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // Get real corpse from mapping
+            Creature* realCorpse = player->GetMap()->GetCreature(mapping.corpseGuid);
+            if (!realCorpse)
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // Security: Validate distance to REAL corpse using AOE loot range
+            float aoeLootRange = sWorld->getFloatConfig(CONFIG_AOE_LOOT_RANGE);
+            if (!realCorpse->IsWithinDistInMap(player, aoeLootRange))
+            {
+                player->SendLootError(lguid, LOOT_ERROR_TOO_FAR);
+                return;
+            }
+
+            // Security: Validate item hasn't changed (GUID reuse protection)
+            if (mapping.originalSlot >= realCorpse->loot.items.size())
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            LootItem& realItem = realCorpse->loot.items[mapping.originalSlot];
+            if (realItem.itemid != mapping.itemId || realItem.is_looted)
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // Security: Check if item is blocked for rolling
+            if (realItem.is_blocked)
+            {
+                player->SendLootError(lguid, LOOT_ERROR_LOCKED);
+                return;
+            }
+
+            // CRITICAL SECTION: Lock the loot to prevent double-loot race condition
+            {
+                std::lock_guard<std::mutex> lock(realCorpse->loot.m_lootMutex);
+
+                // Double-check item is still available after acquiring lock
+                if (realItem.is_looted)
+                {
+                    InvalidateVirtualSlot(lootSlot);
+                    player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                    return;
+                }
+
+                // Loot from REAL corpse using REAL slot
+                player->StoreLootItem(mapping.originalSlot, &realCorpse->loot);
+
+                // Check if item was actually looted (StoreLootItem might fail due to bag space, etc.)
+                if (realItem.is_looted)
+                {
+                    // Mark virtual slot as invalid only if successfully looted
+                    InvalidateVirtualSlot(lootSlot);
+
+                    // Update virtual loot display
+                    virtualLoot->items[lootSlot].is_looted = true;
+                    if (virtualLoot->unlootedCount > 0)
+                        virtualLoot->unlootedCount--;
+                }
+                // If not looted (e.g., bag full), leave slot valid so player can try again
+            }
+
+            // Update visual state of the real corpse if it's now empty
+            if (realCorpse->loot.isLooted())
+            {
+                realCorpse->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
+                realCorpse->AllLootRemovedFromCorpse();
+            }
+
+            return;
+        }
+        // PATH 2: Quest items (slots >= virtualLoot->items.size())
+        // Quest items use the same slot mapping system as regular items
+        else
+        {
+            // Security: Validate slot mapping exists
+            if (lootSlot >= slotMap->size())
+            {
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            const AOELootSlotMapping& mapping = (*slotMap)[lootSlot];
+
+            // Security: Validate mapping is still valid and is a quest item
+            if (!mapping.isValid || !mapping.isQuestItem)
+            {
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // Get real corpse from mapping
+            Creature* realCorpse = player->GetMap()->GetCreature(mapping.corpseGuid);
+            if (!realCorpse)
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // Security: Validate distance to REAL corpse using AOE loot range
+            float aoeLootRange = sWorld->getFloatConfig(CONFIG_AOE_LOOT_RANGE);
+            if (!realCorpse->IsWithinDistInMap(player, aoeLootRange))
+            {
+                player->SendLootError(lguid, LOOT_ERROR_TOO_FAR);
+                return;
+            }
+
+            // Security: Validate quest item hasn't changed (GUID reuse protection)
+            if (mapping.originalSlot >= realCorpse->loot.quest_items.size())
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            LootItem& realQuestItem = realCorpse->loot.quest_items[mapping.originalSlot];
+            if (realQuestItem.itemid != mapping.itemId || realQuestItem.is_looted)
+            {
+                InvalidateVirtualSlot(lootSlot);
+                player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                return;
+            }
+
+            // CRITICAL SECTION: Lock the loot to prevent double-loot race condition
+            {
+                std::lock_guard<std::mutex> lock(realCorpse->loot.m_lootMutex);
+
+                // Double-check item is still available after acquiring lock
+                if (realQuestItem.is_looted)
+                {
+                    InvalidateVirtualSlot(lootSlot);
+                    player->SendLootError(lguid, LOOT_ERROR_DIDNT_KILL);
+                    return;
+                }
+
+                // Calculate real slot index for StoreLootItem (quest items come after regular items)
+                uint8 realSlotIndex = realCorpse->loot.items.size() + mapping.originalSlot;
+
+                // Loot the quest item
+                player->StoreLootItem(realSlotIndex, &realCorpse->loot);
+
+                // Check if item was actually looted (StoreLootItem might fail due to bag space, etc.)
+                if (realQuestItem.is_looted)
+                {
+                    // Mark virtual slot as invalid only if successfully looted
+                    InvalidateVirtualSlot(lootSlot);
+
+                    // Update virtual loot display - mark quest item as looted
+                    uint32 questItemIndex = lootSlot - virtualLoot->items.size();
+                    if (questItemIndex < virtualLoot->quest_items.size())
+                    {
+                        virtualLoot->quest_items[questItemIndex].is_looted = true;
+                        if (virtualLoot->unlootedCount > 0)
+                            virtualLoot->unlootedCount--;
+
+                        // Notify client to remove quest item from loot window
+                        virtualLoot->NotifyQuestItemRemoved(questItemIndex);
+                    }
+                }
+                // If not looted (e.g., bag full), leave slot valid so player can try again
+            }
+
+            // IMPORTANT: After looting quest items, check ALL involved corpses to see if they
+            // still have lootable items. If a corpse only had quest items and the player no longer
+            // needs them (quest complete), the corpse should no longer be lootable.
+            for (ObjectGuid corpseGuid : *involvedCorpses)
+            {
+                Creature* corpse = player->GetMap()->GetCreature(corpseGuid);
+                if (!corpse)
+                    continue;
+
+                // Check if this corpse still has items the player can loot
+                if (corpse->loot.isLooted() || !corpse->loot.hasItemFor(player))
+                {
+                    corpse->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
+
+                    // Only call AllLootRemovedFromCorpse if fully looted (for skinning)
+                    if (corpse->loot.isLooted())
+                        corpse->AllLootRemovedFromCorpse();
+                }
+            }
+
+            return;
+        }
+    }
+
+    // Normal looting (not AOE)
     player->StoreLootItem(lootSlot, loot);
 
     // If player is removing the last LootItem, delete the empty container.
@@ -107,6 +348,95 @@ void WorldSession::HandleLootMoneyOpcode(WorldPacket& /*recvData*/)
     if (!guid)
         return;
 
+    // AOE Loot: Check if this is an AOE loot session, loot gold from ALL involved corpses
+    std::set<ObjectGuid> involvedCorpses = GetInvolvedCorpses();
+    if (!involvedCorpses.empty())
+    {
+        uint32 totalGold = 0;
+        bool anyGroupLoot = false;
+
+        // Collect gold from all involved corpses
+        for (ObjectGuid corpseGuid : involvedCorpses)
+        {
+            Creature* corpse = player->GetMap()->GetCreature(corpseGuid);
+            if (!corpse)
+                continue;
+
+            Loot* corpseLoot = &corpse->loot;
+
+            // For AOE loot, we're more permissive - if player can open the main corpse,
+            // they should be able to loot gold from all merged corpses
+            // Just check if corpse has gold (skip hasItemFor permission check)
+            if (corpseLoot->gold > 0)
+            {
+                totalGold += corpseLoot->gold;
+
+                // Check if any corpse requires group sharing
+                if (corpse->GetLootRecipientGroup())
+                    anyGroupLoot = true;
+
+                // Remove gold from corpse
+                corpseLoot->gold = 0;
+                corpseLoot->NotifyMoneyRemoved();
+            }
+        }
+
+        // Give gold to player (or group if applicable)
+        if (totalGold > 0)
+        {
+            if (anyGroupLoot && player->GetGroup())
+            {
+                // Group gold sharing
+                Group* group = player->GetGroup();
+                std::vector<Player*> playersNear;
+
+                for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                {
+                    Player* member = itr->GetSource();
+                    if (!member)
+                        continue;
+
+                    if (player->IsAtGroupRewardDistance(member))
+                        playersNear.push_back(member);
+                }
+
+                uint32 goldPerPlayer = uint32(totalGold / playersNear.size());
+
+                for (Player* member : playersNear)
+                {
+                    member->ModifyMoney(goldPerPlayer);
+                    member->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_MONEY, goldPerPlayer);
+
+                    WorldPacket data(SMSG_LOOT_MONEY_NOTIFY, 4 + 1);
+                    data << uint32(goldPerPlayer);
+                    data << uint8(playersNear.size() <= 1);
+                    member->SendDirectMessage(&data);
+                }
+            }
+            else
+            {
+                // Solo gold
+                player->ModifyMoney(totalGold);
+                player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_MONEY, totalGold);
+
+                WorldPacket data(SMSG_LOOT_MONEY_NOTIFY, 4 + 1);
+                data << uint32(totalGold);
+                data << uint8(1); // "You loot..."
+                SendPacket(&data);
+            }
+        }
+
+        // Update virtual loot to remove gold icon
+        if (Loot* virtualLoot = GetVirtualAOELoot())
+        {
+            virtualLoot->gold = 0;
+            virtualLoot->NotifyMoneyRemoved();
+        }
+
+        return; // AOE gold looting complete
+    }
+
+    // Normal gold looting (not AOE)
     Loot* loot = nullptr;
     bool shareMoney = true;
 
@@ -165,6 +495,50 @@ void WorldSession::HandleLootMoneyOpcode(WorldPacket& /*recvData*/)
     if (loot)
     {
         loot->NotifyMoneyRemoved();
+        //npcbot
+        if (shareMoney && player->GetGroup() && BotCfg::GetNpcBotMoneyShareEnabled())
+        {
+            Group* group = player->GetGroup();
+            std::vector<Player*> playersNear;
+            uint32 bots_count = 0;
+            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+            {
+                Player* member = itr->GetSource();
+                if (!member)
+                    continue;
+
+                if (player->IsAtGroupRewardDistance(member))
+                    playersNear.push_back(member);
+
+                if (!member->HaveBot())
+                    continue;
+
+                BotMap const* botMap = member->GetBotMgr()->GetBotMap();
+                for (auto const& kv : *botMap)
+                {
+                    Creature const* bot = kv.second;
+                    if (bot && bot->IsAlive() && bot->IsInMap(player) && (group->IsMember(kv.first) || !BotCfg::GetNpcBotMoneyShareGroupOnly()) &&
+                        (member->GetMap()->IsDungeon() || player->GetDistance(bot) <= sWorld->getFloatConfig(CONFIG_GROUP_XP_DISTANCE)))
+                        ++bots_count;
+                }
+            }
+
+            uint32 sharers_count = uint32(playersNear.size()) + bots_count;
+            uint32 goldPerPlayer = uint32(loot->gold / sharers_count);
+
+            for (std::vector<Player*>::const_iterator i = playersNear.begin(); i != playersNear.end(); ++i)
+            {
+                (*i)->ModifyMoney(goldPerPlayer);
+                (*i)->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_LOOT_MONEY, goldPerPlayer);
+
+                WorldPacket data(SMSG_LOOT_MONEY_NOTIFY, 4 + 1);
+                data << uint32(goldPerPlayer);
+                data << uint8(sharers_count <= 1); // Controls the text displayed in chat. 0 is "Your share is..." and 1 is "You loot..."
+                (*i)->SendDirectMessage(&data);
+            }
+        }
+        else
+        //end npcbot
         if (shareMoney && player->GetGroup())      //item, pickpocket and players can be looted only single player
         {
             Group* group = player->GetGroup();
@@ -379,6 +753,9 @@ void WorldSession::DoLootRelease(ObjectGuid lguid)
             // force dynflag update to update looter and lootable info
             creature->ForceValuesUpdateAtIndex(UNIT_DYNAMIC_FLAGS);
         }
+
+        // AOE Loot: Clean up virtual loot session when player releases creature loot
+        CleanupAOELootSession(this);
     }
 
     //Player is not looking at loot list, he doesn't need to see updates on the loot list
