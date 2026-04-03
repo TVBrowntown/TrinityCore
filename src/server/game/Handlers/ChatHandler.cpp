@@ -342,6 +342,35 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 TSPlayer(sender).SendAddonMessage("tsmp", std::to_string(sender->GetMapId()), CHAT_MSG_WHISPER, TSPlayer(sender));
             }
             // @tswow-end
+            //npcbot: handle whisper to bot by name
+            if (!receiver && lang != LANG_ADDON)
+            {
+                // Check if the whisper target is a nearby bot
+                Unit* target = sender->GetSelectedUnit();
+                if (target && target->IsNPCBot() && target->GetName() == to)
+                {
+                    // Bot sends a random emote response after a short delay
+                    static const char* botResponses[] = {
+                        "...", "Hmm?", "I'm busy.", "Not now.",
+                        "What do you want?", "Leave me alone.",
+                        "I have things to do.", "Perhaps later.",
+                        "Can't talk right now.", "Move along."
+                    };
+                    const char* response = botResponses[urand(0, 9)];
+
+                    // Send "you whispered" confirmation
+                    WorldPacket data;
+                    ChatHandler::BuildChatPacket(data, CHAT_MSG_WHISPER_INFORM, LANG_UNIVERSAL, sender, sender, msg);
+                    sender->SendDirectMessage(&data);
+
+                    // Send bot's reply as a whisper from the bot
+                    WorldPacket botReply;
+                    ChatHandler::BuildChatPacket(botReply, CHAT_MSG_WHISPER, LANG_UNIVERSAL, target, sender, response);
+                    sender->SendDirectMessage(&botReply);
+                    break;
+                }
+            }
+            //end npcbot
             if (!receiver || (lang != LANG_ADDON && !receiver->isAcceptWhispers() && receiver->GetSession()->HasPermission(rbac::RBAC_PERM_CAN_FILTER_WHISPERS) && !receiver->IsInWhisperWhiteList(sender->GetGUID())))
             {
                 SendPlayerNotFoundNotice(to);

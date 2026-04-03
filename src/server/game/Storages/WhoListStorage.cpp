@@ -21,6 +21,11 @@
 #include "Player.h"
 #include "GuildMgr.h"
 #include "WorldSession.h"
+//npcbot
+#include "botdatamgr.h"
+#include "Creature.h"
+#include "Map.h"
+//end npcbot
 
 WhoListStorageMgr* WhoListStorageMgr::instance()
 {
@@ -58,4 +63,38 @@ void WhoListStorageMgr::Update()
             itr->second->GetClass(), itr->second->GetRace(), itr->second->GetZoneId(), itr->second->GetNativeGender(), itr->second->IsVisible(),
             widePlayerName, wideGuildName, playerName, guildName);
     }
+
+    //npcbot: add wandering bots to who list
+    if (BotDataMgr::AllBotsLoaded())
+    {
+        NpcBotRegistry const& botList = BotDataMgr::GetExistingNPCBots();
+        for (Creature const* bot : botList)
+        {
+            if (!bot || !bot->IsAlive() || !bot->FindMap() || !bot->IsFreeBot())
+                continue;
+
+            std::string botName = bot->GetName();
+            std::wstring wideBotName;
+            if (!Utf8toWStr(botName, wideBotName))
+                continue;
+            wstrToLower(wideBotName);
+
+            NpcBotExtras const* extras = BotDataMgr::SelectNpcBotExtras(bot->GetEntry());
+            if (!extras)
+                continue;
+
+            uint8 botClass = extras->bclass;
+            uint8 botRace = extras->race;
+            uint32 botTeam = (botRace == 2 || botRace == 5 || botRace == 6 || botRace == 8) ? HORDE : ALLIANCE;
+            uint8 botGender = 0;
+            if (NpcBotAppearanceData const* appearance = BotDataMgr::SelectNpcBotAppearance(bot->GetEntry()))
+                botGender = appearance->gender;
+
+            std::wstring wideGuildEmpty;
+            _whoListStorage.emplace_back(bot->GetGUID(), botTeam, SEC_PLAYER, bot->GetLevel(),
+                botClass, botRace, bot->GetZoneId(), botGender, true,
+                wideBotName, wideGuildEmpty, botName, "");
+        }
+    }
+    //end npcbot
 }

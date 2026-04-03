@@ -24,6 +24,7 @@
 #include "Spell.h"
 #include "AccountMgr.h"
 #include "Battleground.h"
+#include "Chat.h"
 #include "CellImpl.h"
 #include "Common.h"
 #include "Creature.h"
@@ -3998,7 +3999,25 @@ void Spell::EffectDuel()
     if (effectHandleMode != SPELL_EFFECT_HANDLE_HIT_TARGET)
         return;
 
-    if (!unitTarget || m_caster->GetTypeId() != TYPEID_PLAYER || unitTarget->GetTypeId() != TYPEID_PLAYER)
+    if (!unitTarget || m_caster->GetTypeId() != TYPEID_PLAYER)
+        return;
+
+    //npcbot: handle duel with bot - bot engages in combat with the player
+    if (unitTarget->IsNPCBot() && unitTarget->ToCreature()->IsFreeBot())
+    {
+        Unit* casterUnit = m_caster->ToUnit();
+        if (casterUnit)
+        {
+            unitTarget->SetInCombatWith(casterUnit);
+            casterUnit->SetInCombatWith(unitTarget);
+            unitTarget->ToCreature()->AI()->AttackStart(casterUnit);
+            ChatHandler(m_caster->ToPlayer()->GetSession()).SendSysMessage("The bot accepts your challenge!");
+        }
+        return;
+    }
+    //end npcbot
+
+    if (unitTarget->GetTypeId() != TYPEID_PLAYER)
         return;
 
     Player* caster = m_caster->ToPlayer();

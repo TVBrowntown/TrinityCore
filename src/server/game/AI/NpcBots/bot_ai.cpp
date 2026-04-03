@@ -7697,12 +7697,30 @@ bool bot_ai::OnGossipHello(Player* player, uint32 /*option*/)
     if (!BotCfg::IsNpcBotModEnabled() || !(IsWanderer() ? BotCfg::IsWanderingClassEnabled(_botclass) : BotCfg::IsClassEnabled(_botclass)) ||
         IsTempBot() || me->IsInCombat() || CCed(me) || IsCasting() || IsDuringTeleport() ||
         HasBotCommandState(BOT_COMMAND_ISSUED_ORDER | BOT_COMMAND_NOGOSSIP) ||
-        (me->GetVehicle() && me->GetVehicle()->GetBase()->IsInCombat()) ||
-        (!player->IsGameMaster() && IsWanderer()))
+        (me->GetVehicle() && me->GetVehicle()->GetBase()->IsInCombat()))
     {
         player->PlayerTalkClass->SendCloseGossip();
         return true;
     }
+
+    //npcbot: show player-style interaction menu for wandering bots
+    if (IsWanderer() && !player->IsGameMaster())
+    {
+        if (me->isMoving())
+            me->BotStopMovement();
+
+        player->PlayerTalkClass->ClearMenus();
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Whisper", 100, GOSSIP_ACTION_INFO_DEF + 1,
+            "Send a message:", 0, true);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Duel", 101, GOSSIP_ACTION_INFO_DEF + 2);
+        AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, "Trade", 102, GOSSIP_ACTION_INFO_DEF + 3);
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Invite to Group", 103, GOSSIP_ACTION_INFO_DEF + 4);
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Wave", 104, GOSSIP_ACTION_INFO_DEF + 5);
+
+        player->PlayerTalkClass->SendGossipMenu(DEFAULT_GOSSIP_MESSAGE, me->GetGUID());
+        return true;
+    }
+    //end npcbot
 
     if (me->isMoving())
         me->BotStopMovement();
@@ -7984,6 +8002,51 @@ bool bot_ai::OnGossipHello(Player* player, uint32 /*option*/)
 //GossipSelect
 bool bot_ai::OnGossipSelect(Player* player, Creature* creature/* == me*/, uint32 sender, uint32 action)
 {
+    //npcbot: handle wandering bot player-style interactions
+    if (IsWanderer() && !player->IsGameMaster() && sender >= 100 && sender <= 104)
+    {
+        player->PlayerTalkClass->SendCloseGossip();
+
+        static const char* botResponses[] = {
+            "...", "Hmm?", "I'm busy.", "Not now.",
+            "What do you want?", "Leave me alone.",
+            "I have things to do.", "Perhaps later.",
+            "Can't talk right now.", "Move along."
+        };
+
+        switch (sender)
+        {
+            case 101: // Duel
+            {
+                me->SetInCombatWith(player);
+                player->SetInCombatWith(me);
+                me->AI()->AttackStart(player);
+                ChatHandler(player->GetSession()).PSendSysMessage("%s accepts your challenge!", me->GetName().c_str());
+                break;
+            }
+            case 102: // Trade
+            {
+                ChatHandler(player->GetSession()).PSendSysMessage("%s shakes their head.", me->GetName().c_str());
+                break;
+            }
+            case 103: // Invite to Group
+            {
+                ChatHandler(player->GetSession()).PSendSysMessage("%s seems uninterested in joining your group.", me->GetName().c_str());
+                ChatHandler(player->GetSession()).SendSysMessage("Use '.npcbot add' while targeting a bot to hire them instead.");
+                break;
+            }
+            case 104: // Wave
+            {
+                me->HandleEmoteCommand(EMOTE_ONESHOT_WAVE);
+                break;
+            }
+            default: // 100 = Whisper (handled in OnGossipSelectCode)
+                break;
+        }
+        return true;
+    }
+    //end npcbot
+
     if (!BotCfg::IsNpcBotModEnabled() || me->HasUnitState(UNIT_STATE_CASTING) || CCed(me) || HasBotCommandState(BOT_COMMAND_ISSUED_ORDER) ||
         (me->GetVehicle() && me->GetVehicle()->GetBase()->IsInCombat()))
     {
@@ -11224,6 +11287,27 @@ bool bot_ai::OnGossipSelectCode(Player* player, Creature* creature/* == me*/, ui
 {
     if (!*code)
         return true;
+
+    //npcbot: handle whisper from wandering bot gossip menu
+    if (sender == 100 && IsWanderer() && !player->IsGameMaster())
+    {
+        player->PlayerTalkClass->SendCloseGossip();
+
+        static const char* botResponses[] = {
+            "...", "Hmm?", "I'm busy.", "Not now.",
+            "What do you want?", "Leave me alone.",
+            "I have things to do.", "Perhaps later.",
+            "Can't talk right now.", "Move along."
+        };
+        const char* response = botResponses[urand(0, 9)];
+
+        // Send as a proper whisper packet with bot's name as sender
+        WorldPacket data;
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_WHISPER, LANG_UNIVERSAL, me, player, response);
+        player->SendDirectMessage(&data);
+        return true;
+    }
+    //end npcbot
 
     if (!BotCfg::IsNpcBotModEnabled() || me->HasUnitState(UNIT_STATE_CASTING) || CCed(me) || IsDuringTeleport() ||
         HasBotCommandState(BOT_COMMAND_ISSUED_ORDER) ||

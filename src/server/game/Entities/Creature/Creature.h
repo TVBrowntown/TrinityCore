@@ -72,6 +72,9 @@ class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public Ma
 
         void AddToWorld() override;
         void RemoveFromWorld() override;
+        //npcbot: override update block to send bots as players
+        void BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const override;
+        //end npcbot
 
         float GetNativeObjectScale() const override;
         void SetObjectScale(float scale) override;

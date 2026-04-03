@@ -17,6 +17,7 @@
 
 #include "WorldSession.h"
 #include "CharacterCache.h"
+#include "Chat.h"
 #include "Common.h"
 #include "DatabaseEnv.h"
 #include "Group.h"
@@ -79,6 +80,28 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Party::PartyInviteClien
 
     Player* invitingPlayer = GetPlayer();
     Player* invitedPlayer = ObjectAccessor::FindPlayerByName(packet.TargetName);
+
+    //npcbot: handle group invite for bots by name
+    if (!invitedPlayer)
+    {
+        // Check if the player has a bot targeted with this name
+        Unit* target = invitingPlayer->GetSelectedUnit();
+        if (target && target->IsNPCBot() && target->GetName() == packet.TargetName)
+        {
+            Creature* bot = target->ToCreature();
+            if (bot->IsFreeBot())
+            {
+                ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("%s declines your group invitation.", bot->GetName().c_str());
+                ChatHandler(GetPlayer()->GetSession()).SendSysMessage("Use '.npcbot add' while targeting a bot to hire them instead.");
+            }
+            else
+            {
+                ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("%s is already in a group.", bot->GetName().c_str());
+            }
+            return;
+        }
+    }
+    //end npcbot
 
     // no player
     if (!invitedPlayer)
