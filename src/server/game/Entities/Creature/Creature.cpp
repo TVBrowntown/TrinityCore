@@ -1006,7 +1006,9 @@ void Creature::Update(uint32 diff)
                     // regenerate health if not in combat or if polymorphed)
                     if (!IsEngaged() || IsPolymorphed())
                         RegenerateHealth();
-                    else if (CanNotReachTarget())
+                    //npcbot: no health regen in combat for bots (like players)
+                    //end npcbot
+                    else if (CanNotReachTarget() && !IsNPCBot())
                     {
                         // regenerate health if cannot reach the target and the setting is set to do so.
                         // this allows to disable the health regen of raid bosses if pathfinding has issues for whatever reason
@@ -1112,8 +1114,25 @@ void Creature::RegenerateHealth()
 
     uint32 addvalue = 0;
 
+    //npcbot: use player-like health regen for bots
+    if (IsNPCBot())
+    {
+        float Spirit = GetStat(STAT_SPIRIT);
+        float HealthIncreaseRate = sWorld->getRate(RATE_HEALTH);
+        // Player regen formula: spirit-based, ~1-2% per tick out of combat
+        if (GetPower(POWER_MANA) > 0)
+            addvalue = uint32(Spirit * 0.25 * HealthIncreaseRate);
+        else
+            addvalue = uint32(Spirit * 0.80 * HealthIncreaseRate);
+
+        // Minimum regen: 0.5% of max health per tick (so bots don't stall at low spirit)
+        uint32 minRegen = maxValue / 200;
+        if (addvalue < minRegen)
+            addvalue = minRegen;
+    }
+    //end npcbot
     // Not only pet, but any controlled creature (and not polymorphed)
-    if (GetCharmerOrOwnerGUID() && !IsPolymorphed())
+    else if (GetCharmerOrOwnerGUID() && !IsPolymorphed())
     {
         float HealthIncreaseRate = sWorld->getRate(RATE_HEALTH);
         float Spirit = GetStat(STAT_SPIRIT);
