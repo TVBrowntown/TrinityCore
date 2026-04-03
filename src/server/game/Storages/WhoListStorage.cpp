@@ -84,6 +84,21 @@ void WhoListStorageMgr::Update()
                 continue;
 
             uint8 botClass = extras->bclass;
+            // Map custom bot classes to closest standard class for /who display
+            // Client only understands classes 1-11
+            switch (botClass)
+            {
+                case 12: botClass = CLASS_WARRIOR; break;       // Blademaster -> Warrior
+                case 13: botClass = CLASS_WARLOCK; break;       // Obsidian Destroyer -> Warlock
+                case 14: botClass = CLASS_MAGE; break;          // Archmage -> Mage
+                case 15: botClass = CLASS_WARLOCK; break;       // Dreadlord -> Warlock
+                case 16: botClass = CLASS_PALADIN; break;       // Spell Breaker -> Paladin
+                case 17: botClass = CLASS_HUNTER; break;        // Dark Ranger -> Hunter
+                case 18: botClass = CLASS_WARLOCK; break;       // Necromancer -> Warlock
+                case 19: botClass = CLASS_MAGE; break;          // Sea Witch -> Mage
+                case 20: botClass = CLASS_WARRIOR; break;       // Crypt Lord -> Warrior
+                default: break;
+            }
             uint8 botRace = extras->race;
             uint32 botTeam = (botRace == 2 || botRace == 5 || botRace == 6 || botRace == 8) ? HORDE : ALLIANCE;
             uint8 botGender = 0;

@@ -17,9 +17,6 @@
 
 #include "Creature.h"
 #include "BattlegroundMgr.h"
-#include "UpdateMask.h"
-#include "UpdateFields.h"
-#include "UpdateData.h"
 #include "CellImpl.h"
 #include "Common.h"
 #include "Containers.h"
@@ -294,12 +291,6 @@ Creature::Creature(bool isWorldObject): Unit(isWorldObject), MapObject(), m_grou
     //end npcbot
 }
 
-//npcbot: override kept for future use
-void Creature::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const
-{
-    Object::BuildCreateUpdateBlockForPlayer(data, target);
-}
-//end npcbot
 
 void Creature::AddToWorld()
 {
