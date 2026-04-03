@@ -127,7 +127,28 @@ namespace Movement
         args.velocity = std::min(args.velocity, args.flags.catmullrom || args.flags.flying ? 50.0f : std::max(28.0f, unit->GetSpeed(MOVE_RUN) * 4.0f));
 
         if (!args.Validate(unit))
+        {
+            // Stuck creature recovery: if a creature fails movement validation repeatedly,
+            // teleport it back to its spawn point to unstick it
+            if (Creature* creature = unit->ToCreature())
+            {
+                creature->m_stuckMovementCounter++;
+                if (creature->m_stuckMovementCounter >= 5)
+                {
+                    creature->m_stuckMovementCounter = 0;
+                    float x, y, z, o;
+                    creature->GetRespawnPosition(x, y, z, &o);
+                    creature->NearTeleportTo(x, y, z, o);
+                    TC_LOG_INFO("misc.movesplineinitargs", "Creature '{}' (Entry: {}) stuck after 5 failed movement attempts - returned to spawn point",
+                        creature->GetName(), creature->GetEntry());
+                }
+            }
             return 0;
+        }
+
+        // Reset stuck counter on successful movement
+        if (Creature* creature = unit->ToCreature())
+            creature->m_stuckMovementCounter = 0;
 
         unit->m_movementInfo.SetMovementFlags(moveFlags);
         move_spline.Initialize(args);

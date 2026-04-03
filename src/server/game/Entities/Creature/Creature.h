@@ -66,6 +66,8 @@ typedef std::unordered_map<uint8, CreatureTextRepeatIds> CreatureTextRepeatGroup
 class TC_GAME_API Creature : public Unit, public GridObject<Creature>, public MapObject
 {
     public:
+        uint8 m_stuckMovementCounter = 0;                            ///< Counts consecutive movement validation failures for stuck recovery
+
         explicit Creature(bool isWorldObject = false);
 
         void AddToWorld() override;
