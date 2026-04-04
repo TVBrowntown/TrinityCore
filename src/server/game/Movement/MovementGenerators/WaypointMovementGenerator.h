@@ -70,6 +70,7 @@ class WaypointMovementGenerator<Creature> : public MovementGeneratorMedium<Creat
 
         TimeTracker _nextMoveTime;
         uint32 _pathId;
+        uint32 _batchedNodes;  // number of extra nodes batched into current spline
         bool _repeating;
         bool _loadedFromDB;
 };

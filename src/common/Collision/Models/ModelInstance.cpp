@@ -16,8 +16,10 @@
  */
 
 #include "ModelInstance.h"
+#include "ModelIgnoreFlags.h"
 #include "WorldModel.h"
 #include "MapTree.h"
+#include <algorithm>
 
 using G3D::Vector3;
 using G3D::Ray;
@@ -33,28 +35,30 @@ namespace VMAP
     bool ModelInstance::intersectRay(G3D::Ray const& pRay, float& pMaxDist, bool pStopAtFirstHit, ModelIgnoreFlags ignoreFlags) const
     {
         if (!iModel)
-        {
-            //std::cout << "<object not loaded>\n";
             return false;
+
+        // For M2 models: only ignore small ones (chairs, lamp posts, bushes).
+        // Large M2 objects (troll archways, giant trees, rock formations) should still block LOS.
+        if ((ignoreFlags & ModelIgnoreFlags::M2) != ModelIgnoreFlags::Nothing && (flags & MOD_M2))
+        {
+            G3D::Vector3 extent = iBound.high() - iBound.low();
+            // Use the largest dimension as the size metric.
+            // Skip M2s smaller than ~3 yards in their largest dimension.
+            float maxExtent = std::max({extent.x, extent.y, extent.z});
+            if (maxExtent < 3.0f)
+                return false;
         }
+
         float time = pRay.intersectionTime(iBound);
         if (time == G3D::finf())
-        {
-//            std::cout << "Ray does not hit '" << name << "'\n";
-
             return false;
-        }
-//        std::cout << "Ray crosses bound of '" << name << "'\n";
-/*        std::cout << "ray from:" << pRay.origin().x << ", " << pRay.origin().y << ", " << pRay.origin().z
-                  << " dir:" << pRay.direction().x << ", " << pRay.direction().y << ", " << pRay.direction().z
-                  << " t/tmax:" << time << '/' << pMaxDist;
-        std::cout << "\nBound lo:" << iBound.low().x << ", " << iBound.low().y << ", " << iBound.low().z << " hi: "
-                  << iBound.high().x << ", " << iBound.high().y << ", " << iBound.high().z << std::endl; */
+
         // child bounds are defined in object space:
         Vector3 p = iInvRot * (pRay.origin() - iPos) * iInvScale;
         Ray modRay(p, iInvRot * pRay.direction());
         float distance = pMaxDist * iInvScale;
-        bool hit = iModel->IntersectRay(modRay, distance, pStopAtFirstHit, ignoreFlags);
+        // Don't pass M2 ignore to WorldModel — we already handled it above
+        bool hit = iModel->IntersectRay(modRay, distance, pStopAtFirstHit, ModelIgnoreFlags::Nothing);
         if (hit)
         {
             distance *= iScale;

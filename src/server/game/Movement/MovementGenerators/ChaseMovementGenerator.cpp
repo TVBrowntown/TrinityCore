@@ -17,6 +17,7 @@
 
 #include "ChaseMovementGenerator.h"
 #include "Creature.h"
+#include "Map.h"
 #include "CreatureAI.h"
 #include "G3DPosition.hpp"
 #include "MotionMaster.h"
@@ -204,6 +205,16 @@ Position ChaseMovementGenerator::PredictTargetPosition(Unit* owner, Unit* target
     predicted.m_positionX += velocity.x * timeToIntercept;
     predicted.m_positionY += velocity.y * timeToIntercept;
 
+    // Validate that the predicted position is reachable — check LOS from target's
+    // current position. If the prediction is behind a wall or over a cliff, fall back
+    // to the target's actual position.
+    float predZ = predicted.m_positionZ;
+    target->UpdateAllowedPositionZ(predicted.m_positionX, predicted.m_positionY, predZ);
+    predicted.m_positionZ = predZ;
+
+    if (!target->IsWithinLOS(predicted.m_positionX, predicted.m_positionY, predicted.m_positionZ))
+        return current;
+
     return predicted;
 }
 
@@ -214,7 +225,7 @@ void ChaseMovementGenerator::Initialize(Unit* /*owner*/)
 
     _path = nullptr;
     _lastTargetPosition.reset();
-    _lastPredictedPosition.reset();
+    _lastDestination.reset();
 }
 
 void ChaseMovementGenerator::Reset(Unit* owner)
@@ -253,6 +264,8 @@ bool ChaseMovementGenerator::Update(Unit* owner, uint32 diff)
     float const maxTarget = _range ? _range->MaxTolerance + hitboxSum : CONTACT_DISTANCE + hitboxSum;
     Optional<ChaseAngle> angle = mutualChase ? Optional<ChaseAngle>() : _angle;
 
+    bool const isMoving = owner->HasUnitState(UNIT_STATE_CHASE_MOVE) && !owner->movespline->Finalized();
+
     // periodically check if we're already in the expected range...
     _rangeCheckTimer.Update(diff);
     if (_rangeCheckTimer.Passed())
@@ -275,6 +288,7 @@ bool ChaseMovementGenerator::Update(Unit* owner, uint32 diff)
         {
             RemoveFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
             _path = nullptr;
+            _lastDestination.reset();
             if (Creature* cOwner = owner->ToCreature())
                 cOwner->SetCannotReachTarget(false);
             owner->StopMoving();
@@ -289,6 +303,7 @@ bool ChaseMovementGenerator::Update(Unit* owner, uint32 diff)
     {
         RemoveFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
         _path = nullptr;
+        _lastDestination.reset();
         if (Creature* cOwner = owner->ToCreature())
             cOwner->SetCannotReachTarget(false);
         owner->ClearUnitState(UNIT_STATE_CHASE_MOVE);
@@ -296,120 +311,211 @@ bool ChaseMovementGenerator::Update(Unit* owner, uint32 diff)
         DoMovementInform(owner, target);
     }
 
-    // Check if we need to move or adjust our path
-    // This includes: target moved, state changed, OR we're not in acceptable range
-    bool targetMoved = !_lastTargetPosition || target->GetPosition() != _lastTargetPosition.value();
-    bool stateChanged = mutualChase != _mutualChase;
-    bool needsPositioning = owner->HasUnitState(UNIT_STATE_CHASE_MOVE) || !PositionOkay(owner, target, minRange, maxRange, angle);
+    // Always track target position for velocity calculations
+    _lastTargetPosition = target->GetPosition();
+    _mutualChase = mutualChase;
 
-    if (targetMoved || stateChanged || needsPositioning)
+    // Don't recalculate if we're already in acceptable position and not moving
+    if (!isMoving && PositionOkay(owner, target, minRange, maxRange, angle))
+        return true;
+
+    // If currently moving and we're close to the target, let the current spline finish
+    // instead of interrupting with a new path (prevents stop-start jitter at close range)
+    if (isMoving)
     {
-        // Update our tracking regardless of whether target moved
-        // This ensures we always have fresh position data for velocity calculation
-        _lastTargetPosition = target->GetPosition();
-        _mutualChase = mutualChase;
-
-        // Only recalculate path if we need to position ourselves
-        if (needsPositioning)
+        float distToTargetSq = owner->GetExactDistSq(target);
+        // If we're within twice max range, the current path will likely get us close enough
+        if (distToTargetSq < square(maxRange * 2.0f))
         {
-            Creature* const cOwner = owner->ToCreature();
-            // can we get to the target?
-            if (cOwner && !target->isInAccessiblePlaceFor(cOwner))
+            // Check if we're roughly heading the right direction by comparing
+            // our distance to target vs the path endpoint distance to target
+            Movement::PointsArray const& path = _path ? _path->GetPath() : Movement::PointsArray();
+            if (!path.empty())
             {
-                cOwner->SetCannotReachTarget(true);
-                cOwner->StopMoving();
-                _path = nullptr;
-                return true;
+                G3D::Vector3 const& pathEnd = path.back();
+                float pathEndDistSq = square(pathEnd.x - target->GetPositionX())
+                                    + square(pathEnd.y - target->GetPositionY());
+                // If our path endpoint is within max range of target, let it finish
+                if (pathEndDistSq < square(maxRange))
+                    return true;
             }
+        }
+    }
 
-            // figure out which way we want to move
-            bool const moveToward = !owner->IsInDist(target, maxRange);
+    // Calculate where we want to go
+    Creature* const cOwner = owner->ToCreature();
+    if (cOwner && !target->isInAccessiblePlaceFor(cOwner))
+    {
+        cOwner->SetCannotReachTarget(true);
+        cOwner->StopMoving();
+        _path = nullptr;
+        _lastDestination.reset();
+        return true;
+    }
 
-            // make a new path if we have to...
-            if (!_path || moveToward != _movingTowards)
-                _path = std::make_unique<PathGenerator>(owner);
+    bool const moveToward = !owner->IsInDist(target, maxRange);
 
-            float x, y, z;
-            bool shortenPath;
-            Position newDestination;
+    float x, y, z;
+    bool shortenPath;
 
-            // if we want to move toward the target and there's no fixed angle...
-            if (moveToward && !angle)
-            {
-                // Use predictive pursuit to intercept where target will be
-                Position predicted = PredictTargetPosition(owner, target);
+    if (moveToward && !angle)
+    {
+        Position predicted = PredictTargetPosition(owner, target);
+        predicted.GetPosition(x, y, z);
+        shortenPath = true;
+    }
+    else
+    {
+        target->GetNearPoint(owner, x, y, z, (moveToward ? maxTarget : minTarget) - hitboxSum, angle ? target->ToAbsoluteAngle(angle->RelativeAngle) : target->GetAbsoluteAngle(owner));
+        shortenPath = false;
+    }
 
-                // Path stability check: only recalculate if prediction changed significantly
-                // This prevents jittery path updates from minor target position changes
-                if (_lastPredictedPosition.has_value() && owner->HasUnitState(UNIT_STATE_CHASE_MOVE))
-                {
-                    float distChange = predicted.GetExactDist(_lastPredictedPosition.value());
-                    if (distChange < PATH_RECALC_DISTANCE_THRESHOLD)
-                    {
-                        // Prediction hasn't changed much, keep current path for smooth movement
-                        return true;
-                    }
-                }
+    // Path stability: skip recalc if destination hasn't changed enough
+    // This works for ALL chase modes (predictive, angle-based, nearpoint)
+    bool destChangedSignificantly = true;
+    if (_lastDestination.has_value() && isMoving)
+    {
+        float destChangeSq = square(x - _lastDestination->GetPositionX())
+                           + square(y - _lastDestination->GetPositionY());
+        if (destChangeSq < square(PATH_RECALC_DISTANCE_THRESHOLD))
+            return true;
 
-                _lastPredictedPosition = predicted;
-                predicted.GetPosition(x, y, z);
-                shortenPath = true;
-            }
-            else
-            {
-                // otherwise, we fall back to nearpoint finding
-                target->GetNearPoint(owner, x, y, z, (moveToward ? maxTarget : minTarget) - hitboxSum, angle ? target->ToAbsoluteAngle(angle->RelativeAngle) : target->GetAbsoluteAngle(owner));
-                shortenPath = false;
-            }
+        // FIX 1: If destination changed a lot, invalidate the cached poly path
+        // so PathGenerator doesn't reuse 80% of the old route that pointed
+        // toward the previous target location
+        if (destChangeSq > square(PATH_RECALC_DISTANCE_THRESHOLD * 3.0f) && _path)
+            _path->InvalidateOldPath();
 
-            if (owner->IsHovering())
-                owner->UpdateAllowedPositionZ(x, y, z);
+        destChangedSignificantly = true;
+    }
 
-            bool success = _path->CalculatePath(x, y, z, owner->CanFly());
-            if (!success || (_path->GetPathType() & (PATHFIND_NOPATH /* | PATHFIND_INCOMPLETE*/)))
+    if (owner->IsHovering())
+        owner->UpdateAllowedPositionZ(x, y, z);
+
+    // Don't start a new spline for tiny movements (prevents micro-jitter at close range)
+    if (!isMoving)
+    {
+        float moveSq = square(owner->GetPositionX() - x) + square(owner->GetPositionY() - y);
+        if (moveSq < MIN_CHASE_RELOCATE_DIST_SQ && PositionOkay(owner, target, minRange, maxRange, angle))
+            return true;
+    }
+
+    // Build path
+    if (!_path || moveToward != _movingTowards)
+        _path = std::make_unique<PathGenerator>(owner);
+
+    bool success = _path->CalculatePath(x, y, z, owner->CanFly());
+    if (!success || (_path->GetPathType() & PATHFIND_NOPATH))
+    {
+        if (cOwner)
+            cOwner->SetCannotReachTarget(true);
+        owner->StopMoving();
+        return true;
+    }
+
+    // FIX 3: If the path is incomplete, check that it actually gets us closer to the target.
+    // Incomplete paths end at an intermediate navmesh point that might be in the wrong direction.
+    if (_path->GetPathType() & PATHFIND_INCOMPLETE)
+    {
+        Movement::PointsArray const& points = _path->GetPath();
+        if (points.size() >= 2)
+        {
+            G3D::Vector3 const& pathEnd = points.back();
+            float pathEndDistSq = square(pathEnd.x - target->GetPositionX())
+                                + square(pathEnd.y - target->GetPositionY());
+            float ownerDistSq = square(owner->GetPositionX() - target->GetPositionX())
+                              + square(owner->GetPositionY() - target->GetPositionY());
+            // If the incomplete path endpoint isn't meaningfully closer than where we are now, reject it
+            if (pathEndDistSq >= ownerDistSq * 0.9f)
             {
                 if (cOwner)
                     cOwner->SetCannotReachTarget(true);
                 owner->StopMoving();
                 return true;
             }
-
-            if (shortenPath)
-                _path->ShortenPathUntilDist(PositionToVector3(target), maxTarget);
-
-            if (cOwner)
-                cOwner->SetCannotReachTarget(false);
-
-            bool walk = false;
-            if (cOwner && !cOwner->IsPet())
-            {
-                switch (cOwner->GetMovementTemplate().GetChase())
-                {
-                    case CreatureChaseMovementType::CanWalk:
-                        walk = owner->IsWalking();
-                        break;
-                    case CreatureChaseMovementType::AlwaysWalk:
-                        walk = true;
-                        break;
-                    default:
-                        break;
-                }
-            }
-
-            owner->AddUnitState(UNIT_STATE_CHASE_MOVE);
-            AddFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
-
-            Movement::MoveSplineInit init(owner);
-            init.MovebyPath(_path->GetPath());
-            init.SetWalk(walk);
-
-            // Let orientation follow the movement path naturally for smooth turning
-            // The spline system will interpolate orientation along linear segments
-            // Path stability (2 yard threshold) prevents frequent recalculations
-
-            init.Launch();
         }
     }
+
+    if (shortenPath)
+        _path->ShortenPathUntilDist(PositionToVector3(target), maxTarget);
+
+    if (cOwner)
+        cOwner->SetCannotReachTarget(false);
+
+    // Save the destination we're actually pathing to
+    _lastDestination = Position(x, y, z);
+    _movingTowards = moveToward;
+
+    bool walk = false;
+    if (cOwner && !cOwner->IsPet())
+    {
+        switch (cOwner->GetMovementTemplate().GetChase())
+        {
+            case CreatureChaseMovementType::CanWalk:
+                walk = owner->IsWalking();
+                break;
+            case CreatureChaseMovementType::AlwaysWalk:
+                walk = true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    owner->AddUnitState(UNIT_STATE_CHASE_MOVE);
+    AddFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
+
+    Movement::MoveSplineInit init(owner);
+
+    // When both units are in water, the navmesh only has surface-level polygons
+    // so paths stay at the water surface. Fix by interpolating Z toward the target's depth
+    // while keeping the navmesh X/Y for horizontal obstacle avoidance.
+    // Use IsUnderWater for a more stable check — IsInWater can flicker near the surface
+    if ((owner->IsInWater() || owner->IsUnderWater()) && (target->IsInWater() || target->IsUnderWater()))
+    {
+        Movement::PointsArray adjustedPath = _path->GetPath();
+        if (adjustedPath.size() >= 2)
+        {
+            float startZ = owner->GetPositionZ();
+            float endZ = target->GetPositionZ();
+            float totalDist = 0.0f;
+
+            for (size_t i = 1; i < adjustedPath.size(); ++i)
+            {
+                float dx = adjustedPath[i].x - adjustedPath[i - 1].x;
+                float dy = adjustedPath[i].y - adjustedPath[i - 1].y;
+                totalDist += std::sqrt(dx * dx + dy * dy);
+            }
+
+            if (totalDist > 0.0f)
+            {
+                float accumDist = 0.0f;
+                adjustedPath[0].z = startZ;
+                for (size_t i = 1; i < adjustedPath.size(); ++i)
+                {
+                    float dx = adjustedPath[i].x - adjustedPath[i - 1].x;
+                    float dy = adjustedPath[i].y - adjustedPath[i - 1].y;
+                    accumDist += std::sqrt(dx * dx + dy * dy);
+                    float t = accumDist / totalDist;
+                    float interpZ = startZ + (endZ - startZ) * t;
+
+                    // Clamp above underwater terrain so the path doesn't cut through hills
+                    float groundZ = owner->GetMap()->GetHeight(adjustedPath[i].x, adjustedPath[i].y, interpZ + 5.0f, true);
+                    if (groundZ > INVALID_HEIGHT)
+                        interpZ = std::max(interpZ, groundZ + 1.0f);
+
+                    adjustedPath[i].z = interpZ;
+                }
+            }
+        }
+        init.MovebyPath(adjustedPath);
+    }
+    else
+        init.MovebyPath(_path->GetPath());
+
+    init.SetWalk(walk);
+    init.SetSmooth();
+    init.Launch();
 
     // and then, finally, we're done for the tick
     return true;

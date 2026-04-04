@@ -17,6 +17,7 @@
 
 #include "FollowMovementGenerator.h"
 #include "Creature.h"
+#include "Map.h"
 #include "CreatureAI.h"
 #include "MoveSpline.h"
 #include "MoveSplineInit.h"
@@ -168,8 +169,52 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
             AddFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
 
             Movement::MoveSplineInit init(owner);
-            init.MovebyPath(_path->GetPath());
+
+            // Interpolate Z toward target depth when both units are in water
+            if (owner->IsInWater() && target->IsInWater())
+            {
+                Movement::PointsArray adjustedPath = _path->GetPath();
+                if (adjustedPath.size() >= 2)
+                {
+                    float startZ = owner->GetPositionZ();
+                    float endZ = target->GetPositionZ();
+                    float totalDist = 0.0f;
+
+                    for (size_t i = 1; i < adjustedPath.size(); ++i)
+                    {
+                        float dx = adjustedPath[i].x - adjustedPath[i - 1].x;
+                        float dy = adjustedPath[i].y - adjustedPath[i - 1].y;
+                        totalDist += std::sqrt(dx * dx + dy * dy);
+                    }
+
+                    if (totalDist > 0.0f)
+                    {
+                        float accumDist = 0.0f;
+                        adjustedPath[0].z = startZ;
+                        for (size_t i = 1; i < adjustedPath.size(); ++i)
+                        {
+                            float dx = adjustedPath[i].x - adjustedPath[i - 1].x;
+                            float dy = adjustedPath[i].y - adjustedPath[i - 1].y;
+                            accumDist += std::sqrt(dx * dx + dy * dy);
+                            float t = accumDist / totalDist;
+                            float interpZ = startZ + (endZ - startZ) * t;
+
+                            // Clamp above underwater terrain so the path doesn't cut through hills
+                            float groundZ = owner->GetMap()->GetHeight(adjustedPath[i].x, adjustedPath[i].y, interpZ + 5.0f, true);
+                            if (groundZ > INVALID_HEIGHT)
+                                interpZ = std::max(interpZ, groundZ + 1.0f);
+
+                            adjustedPath[i].z = interpZ;
+                        }
+                    }
+                }
+                init.MovebyPath(adjustedPath);
+            }
+            else
+                init.MovebyPath(_path->GetPath());
+
             init.SetWalk(target->IsWalking());
+            init.SetSmooth(); // CatmullRom for smooth orientation along path
             init.SetFacing(target->GetOrientation());
             init.Launch();
         }

@@ -2987,6 +2987,49 @@ bool Map::isInLineOfSight(float x1, float y1, float z1, float x2, float y2, floa
     if (sWorld->getBoolConfig(CONFIG_CHECK_GOBJECT_LOS) && (checks & LINEOFSIGHT_CHECK_GOBJECT)
       && !_dynamicTree.isInLineOfSight(x1, y1, z1, x2, y2, z2, phasemask))
         return false;
+
+    // Terrain heightmap LOS check: sample points along the ray and check if
+    // the ground height rises above the line between start and end.
+    // VMAP/dynamic checks handle buildings and objects; this handles hills and terrain.
+    // The incoming z1/z2 are at full collision height (head level). For terrain checks
+    // we use a ray from ~2/3 up the source model to ~1/2 up the target model,
+    // approximating upper chest to center mass.
+    if (checks & LINEOFSIGHT_CHECK_VMAP)
+    {
+        // Collision height is already added to z1/z2. Approximate model base by
+        // subtracting a reasonable collision height, then scale to desired fractions.
+        // Default collision height is ~2.0 yards for most humanoids.
+        float const approxHeight = 2.0f;
+        float terrainZ1 = z1 - approxHeight * (1.0f / 3.0f); // 2/3 up the source model
+        float terrainZ2 = z2 - approxHeight * (1.0f / 2.0f); // 1/2 up the target model
+
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        float dz = terrainZ2 - terrainZ1;
+        float distXY = std::sqrt(dx * dx + dy * dy);
+
+        // Only check for distances worth sampling (> 5 yards)
+        if (distXY > 5.0f)
+        {
+            // Sample every 3 yards along the ray, skip first and last points
+            float step = 3.0f;
+            int numSteps = static_cast<int>(distXY / step);
+            if (numSteps > 40) numSteps = 40; // cap iterations
+
+            for (int i = 1; i < numSteps; ++i)
+            {
+                float t = static_cast<float>(i) / static_cast<float>(numSteps);
+                float sampleX = x1 + dx * t;
+                float sampleY = y1 + dy * t;
+                float rayZ = terrainZ1 + dz * t;
+
+                float groundZ = GetHeight(sampleX, sampleY, rayZ + 10.0f, false); // terrain only, no vmap
+                if (groundZ > INVALID_HEIGHT && groundZ > rayZ + 1.0f)
+                    return false; // terrain blocks the ray
+            }
+        }
+    }
+
     return true;
 }
 

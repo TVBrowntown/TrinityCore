@@ -32,7 +32,7 @@
 #include "TSCreature.h"
 // @tswow-end
 
-WaypointMovementGenerator<Creature>::WaypointMovementGenerator(uint32 pathId, bool repeating) : _nextMoveTime(0), _pathId(pathId), _repeating(repeating), _loadedFromDB(true)
+WaypointMovementGenerator<Creature>::WaypointMovementGenerator(uint32 pathId, bool repeating) : _nextMoveTime(0), _pathId(pathId), _batchedNodes(0), _repeating(repeating), _loadedFromDB(true)
 {
     Mode = MOTION_MODE_DEFAULT;
     Priority = MOTION_PRIORITY_NORMAL;
@@ -40,7 +40,7 @@ WaypointMovementGenerator<Creature>::WaypointMovementGenerator(uint32 pathId, bo
     BaseUnitState = UNIT_STATE_ROAMING;
 }
 
-WaypointMovementGenerator<Creature>::WaypointMovementGenerator(WaypointPath& path, bool repeating) : _nextMoveTime(0), _pathId(0), _repeating(repeating), _loadedFromDB(false)
+WaypointMovementGenerator<Creature>::WaypointMovementGenerator(WaypointPath& path, bool repeating) : _nextMoveTime(0), _pathId(0), _batchedNodes(0), _repeating(repeating), _loadedFromDB(false)
 {
     _path = &path;
 
@@ -243,6 +243,14 @@ void WaypointMovementGenerator<Creature>::OnArrived(Creature* owner)
     if (!_path || _path->nodes.empty())
         return;
 
+    // Advance past any extra nodes that were batched into the previous spline
+    if (_batchedNodes > 0)
+    {
+        for (uint32 i = 0; i < _batchedNodes; ++i)
+            _currentNode = (_currentNode + 1) % _path->nodes.size();
+        _batchedNodes = 0;
+    }
+
     ASSERT(_currentNode < _path->nodes.size(), "WaypointMovementGenerator::OnArrived: tried to reference a node id (%u) which is not included in path (%u)", _currentNode, _path->id);
     WaypointNode const& waypoint = _path->nodes[_currentNode];
     if (waypoint.delay)
@@ -363,14 +371,63 @@ void WaypointMovementGenerator<Creature>::StartMove(Creature* owner, bool relaun
     if (transportPath)
         init.DisableTransportPathTransformations();
 
-    //! Do not use formationDest here, MoveTo requires transport offsets due to DisableTransportPathTransformations() call
-    //! but formationDest contains global coordinates
-    init.MoveTo(waypoint.x, waypoint.y, waypoint.z);
+    // Batch consecutive waypoints that share the same move type and have no delay/event/orientation
+    // into a single spline for smoother patrol movement
+    Movement::PointsArray points;
+    points.push_back(G3D::Vector3(owner->GetPositionX(), owner->GetPositionY(), owner->GetPositionZ()));
+    points.push_back(G3D::Vector3(waypoint.x, waypoint.y, waypoint.z));
+
+    uint32 batchMoveType = waypoint.moveType;
+    bool canBatch = !waypoint.delay && !waypoint.eventId
+        && !waypoint.orientation.has_value()
+        && waypoint.moveType != WAYPOINT_MOVE_TYPE_LAND
+        && waypoint.moveType != WAYPOINT_MOVE_TYPE_TAKEOFF;
+
+    if (canBatch)
+    {
+        uint32 peekNode = _currentNode;
+        while (true)
+        {
+            uint32 nextNode;
+            if (peekNode == _path->nodes.size() - 1)
+            {
+                if (!_repeating)
+                    break;
+                nextNode = 0;
+            }
+            else
+                nextNode = peekNode + 1;
+
+            WaypointNode const& nextWaypoint = _path->nodes[nextNode];
+
+            // Stop batching if next node has delay, event, orientation, animation, or different move type
+            if (nextWaypoint.delay || nextWaypoint.eventId || nextWaypoint.orientation.has_value()
+                || nextWaypoint.moveType != batchMoveType
+                || nextWaypoint.moveType == WAYPOINT_MOVE_TYPE_LAND
+                || nextWaypoint.moveType == WAYPOINT_MOVE_TYPE_TAKEOFF)
+                break;
+
+            points.push_back(G3D::Vector3(nextWaypoint.x, nextWaypoint.y, nextWaypoint.z));
+            peekNode = nextNode;
+
+            // Don't wrap around to where we started
+            if (peekNode == _currentNode)
+                break;
+        }
+    }
+
+    // points includes owner position + waypoints, so batched extra nodes = points.size() - 2
+    _batchedNodes = (points.size() > 2) ? static_cast<uint32>(points.size()) - 2 : 0;
+
+    if (points.size() > 2)
+        init.MovebyPath(points);
+    else
+        init.MoveTo(waypoint.x, waypoint.y, waypoint.z);
 
     if (waypoint.orientation.has_value() && waypoint.delay > 0)
         init.SetFacing(*waypoint.orientation);
 
-    switch (waypoint.moveType)
+    switch (batchMoveType)
     {
         case WAYPOINT_MOVE_TYPE_LAND:
             init.SetAnimation(AnimTier::Ground);

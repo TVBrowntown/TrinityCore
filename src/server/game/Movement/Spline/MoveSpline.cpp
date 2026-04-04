@@ -56,7 +56,29 @@ Location MoveSpline::ComputePosition() const
         {
             Vector3 hermite;
             spline.evaluate_derivative(point_Idx, u, hermite);
-            c.orientation = std::atan2(hermite.y, hermite.x);
+            float derivOrientation = std::atan2(hermite.y, hermite.x);
+
+            // Smooth orientation blend: during the first 400ms of the spline, gradually
+            // rotate from the initial orientation to the movement direction. This prevents
+            // the visible snap when a new spline starts in a different direction.
+            int32 totalDuration = Duration();
+            int32 blendTime = std::min(400, totalDuration / 2); // don't blend more than half the spline
+            if (time_passed < blendTime && blendTime > 0)
+            {
+                float t = (float)time_passed / (float)blendTime;
+                // Smooth step for natural acceleration of turning
+                t = t * t * (3.0f - 2.0f * t);
+
+                // Shortest-arc interpolation between angles
+                float diff = derivOrientation - initialOrientation;
+                // Normalize to [-PI, PI]
+                while (diff > float(M_PI))  diff -= float(2.0 * M_PI);
+                while (diff < -float(M_PI)) diff += float(2.0 * M_PI);
+
+                c.orientation = initialOrientation + diff * t;
+            }
+            else
+                c.orientation = derivOrientation;
         }
 
         if (splineflags.backward)
