@@ -2127,6 +2127,31 @@ BotNavigationContext BotBGAIMgr::ComputePotentialField(
     // 4. Enemy vector
     ComputeEnemyVector(bgInstanceId, teamId, myX, myY, p.aggression, isFC, ctx.enemyX, ctx.enemyY);
 
+    // 4b. Wall avoidance: repel from nearby cells with high wall hits
+    // Scans a 20-yard radius for wall-hit cells and creates repulsion from them
+    {
+        auto wallWaypoints = GetLearnedWaypointsNear(me->GetMapId(), myX, myY, 20.0f);
+        for (auto const& wp : wallWaypoints)
+        {
+            if (wp.wallHits < 2) continue; // ignore minor hits
+            float dx = myX - wp.pos.GetPositionX();
+            float dy = myY - wp.pos.GetPositionY();
+            float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist < 1.0f) dist = 1.0f;
+            // Stronger repulsion for more wall hits, inverse with distance
+            float strength = std::min(float(wp.wallHits), 10.0f) / (dist * dist);
+            ctx.wallAvoidX += (dx / dist) * strength;
+            ctx.wallAvoidY += (dy / dist) * strength;
+        }
+        // Normalize if significant
+        float wallMag = std::sqrt(ctx.wallAvoidX * ctx.wallAvoidX + ctx.wallAvoidY * ctx.wallAvoidY);
+        if (wallMag > 0.1f)
+        {
+            ctx.wallAvoidX /= wallMag;
+            ctx.wallAvoidY /= wallMag;
+        }
+    }
+
     // 5. Compute weights: Q-learned preset as base, personality modulation on top
     float wObj, wRepulsion, wPresence, wEnemy;
     if (qPreset)
@@ -2160,13 +2185,16 @@ BotNavigationContext BotBGAIMgr::ComputePotentialField(
         wPresence = 0.05f;
     }
 
+    // Wall avoidance weight — scales with how much wall data exists nearby
+    float wWall = 0.5f;
+
     // Cooldown communication: push harder when team has active major cooldowns
     if (HasActiveTeamCooldown(bgInstanceId, teamId))
         wObj *= 1.2f;
 
-    // 6. Weighted sum
-    float sumX = wObj * ctx.objAttrX + wRepulsion * ctx.repulsionX + wPresence * ctx.presenceX + wEnemy * ctx.enemyX;
-    float sumY = wObj * ctx.objAttrY + wRepulsion * ctx.repulsionY + wPresence * ctx.presenceY + wEnemy * ctx.enemyY;
+    // 6. Weighted sum (5 forces)
+    float sumX = wObj * ctx.objAttrX + wRepulsion * ctx.repulsionX + wPresence * ctx.presenceX + wEnemy * ctx.enemyX + wWall * ctx.wallAvoidX;
+    float sumY = wObj * ctx.objAttrY + wRepulsion * ctx.repulsionY + wPresence * ctx.presenceY + wEnemy * ctx.enemyY + wWall * ctx.wallAvoidY;
 
     ctx.finalMagnitude = std::sqrt(sumX * sumX + sumY * sumY);
     if (ctx.finalMagnitude > 0.1f)

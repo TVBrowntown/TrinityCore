@@ -134,6 +134,7 @@ struct BotNavigationContext {
     float repulsionX{}, repulsionY{};
     float presenceX{}, presenceY{};
     float enemyX{}, enemyY{};
+    float wallAvoidX{}, wallAvoidY{};
     float finalDirX{}, finalDirY{};
     float finalMagnitude{};
 };
