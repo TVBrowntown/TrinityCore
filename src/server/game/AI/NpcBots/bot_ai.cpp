@@ -19445,8 +19445,11 @@ void bot_ai::Evade()
                     // Computes direction from objective attraction, ally repulsion, presence avoidance, enemy vectors
                     Battleground* bgRoute = GetBG();
                     bool usedLearnedRoute = false;
-                    if (me->GetMap()->IsBattlegroundOrArena() && bgRoute && bgRoute->GetStartTime() >= 210000)
+                    if (me->GetMap()->IsBattlegroundOrArena() && bgRoute && bgRoute->GetStatus() == STATUS_IN_PROGRESS)
                     {
+                        // Re-evaluate objective each movement tick (throttled by reaction delay inside)
+                        GetNextBGTravelNodeWithIntelligence();
+
                         Position routeTarget;
                         if (_bgHasObjective)
                             routeTarget = _bgObjectivePos;
@@ -19736,8 +19739,15 @@ void bot_ai::Evade()
                     // Objective proximity checks (flag pickup/delivery, node cap)
                     CheckBGObjectiveProximity();
 
-                    // Defender patrol: if near objective, patrol heatmap hotspots
-                    if (_bgHasObjective && !me->IsInCombat() && me->GetExactDist2d(_bgObjectivePos) < 30.0f)
+                    // Always re-evaluate objective on arrival — game state may have changed
+                    // (flag grabbed, node capped, teammates shifted, etc.)
+                    _bgHasObjective = false;
+                    _bgNeedsReassessment = true;
+                    GetNextBGTravelNodeWithIntelligence();
+
+                    // Defender patrol: if assigned defender and near objective, patrol around it
+                    if (_bgAssignedRole == 2 && _bgHasObjective && !me->IsInCombat() &&
+                        me->GetExactDist2d(_bgObjectivePos) < 30.0f)
                     {
                         auto hotspots = BotBGAIMgr::GetPatrolHotspots(
                             me->GetMapId(), _bgObjectivePos.m_positionX, _bgObjectivePos.m_positionY, 30.0f, 4);
@@ -19782,10 +19792,8 @@ void bot_ai::Evade()
                     }
                     else
                     {
-                        // Arrived at objective — re-evaluate to pick a potentially different one
-                        _bgHasObjective = false;
-                        _bgNeedsReassessment = true;
-                        evadeDelayTimer = urand(1000, 3000); // brief pause before re-evaluating
+                        // Attacker or no objective: brief pause then move to new objective
+                        evadeDelayTimer = urand(500, 1500);
                     }
 
                     _evadeCount = 0;
