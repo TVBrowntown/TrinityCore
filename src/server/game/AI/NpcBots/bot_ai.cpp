@@ -19582,8 +19582,14 @@ void bot_ai::Evade()
                         {
                             pos.m_positionZ = ground;
 
+                            // Steep upward slope rejection: if target is >5 yards above us
+                            // over a short horizontal distance, it's likely a cliff we can't walk up
+                            float climbZ = pos.m_positionZ - me->GetPositionZ();
+                            float hDist = me->GetExactDist2d(pos);
+                            bool tooSteep = (climbZ > 5.0f && hDist > 0.1f && climbZ / hDist > 0.6f);
+
                             // LOS check
-                            if (me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
+                            if (!tooSteep && me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
                                 LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
                             {
                                 usedLearnedRoute = true;
@@ -19610,10 +19616,15 @@ void bot_ai::Evade()
                                         float wpZ = wp.pos.GetPositionZ();
                                         me->UpdateGroundPositionZ(wp.pos.GetPositionX(), wp.pos.GetPositionY(), wpZ);
                                         if (wpZ <= INVALID_HEIGHT) continue;
+                                        // Reject steep upward climbs
+                                        float wpClimb = wpZ - me->GetPositionZ();
+                                        if (wpClimb > 5.0f && wpClimb / len > 0.6f) continue;
                                         if (!me->IsWithinLOS(wp.pos.GetPositionX(), wp.pos.GetPositionY(), wpZ + 2.0f,
                                             LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
                                             continue;
-                                        float score = alignment * std::log(float(wp.visitCount) + 1.0f);
+                                        // Penalize wall-adjacent cells: reduce score by wall hit ratio
+                                        float wallPenalty = (wp.wallHits > 0) ? 1.0f / (1.0f + float(wp.wallHits) * 0.5f) : 1.0f;
+                                        float score = alignment * std::log(float(wp.visitCount) + 1.0f) * wallPenalty;
                                         if (score > bestScore)
                                         {
                                             bestScore = score;
@@ -19691,6 +19702,9 @@ void bot_ai::Evade()
                         !me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
                             LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
                     {
+                        // Record wall hit so future bots avoid this area
+                        BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY());
+
                         float baseAngle = me->GetAbsoluteAngle(pos.m_positionX, pos.m_positionY);
                         bool foundPath = false;
                         // Rotate left/right in ~23° increments to find way around wall
@@ -19726,12 +19740,21 @@ void bot_ai::Evade()
                         }
                     }
 
-                    // BG drop detection: if target is below us, jump/drop instead of walk
+                    // Always use MMAP pathed movement — it handles slopes and ramps naturally.
+                    // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
+                    // AND MMAP can't find a walkable path down.
                     float zDiff = me->GetPositionZ() - pos.m_positionZ;
-                    if (me->GetMap()->IsBattlegroundOrArena() && zDiff > 4.0f &&
-                        me->GetExactDist2d(pos) < 40.0f && !JumpingOrFalling())
+                    float dist2d = me->GetExactDist2d(pos);
+                    if (me->GetMap()->IsBattlegroundOrArena() && zDiff > 8.0f &&
+                        dist2d < 6.0f && !JumpingOrFalling())
                     {
-                        BotMovement(BOT_MOVE_JUMP, &pos, nullptr, false);
+                        // Verify MMAP can't handle this before jumping
+                        PathGenerator path(me);
+                        path.CalculatePath(pos.m_positionX, pos.m_positionY, pos.m_positionZ);
+                        if (path.GetPathType() & (PATHFIND_NOPATH | PATHFIND_SHORT))
+                            BotMovement(BOT_MOVE_JUMP, &pos, nullptr, false);
+                        else
+                            BotMovement(BOT_MOVE_POINT, &pos, nullptr, true);
                     }
                     else
                     {

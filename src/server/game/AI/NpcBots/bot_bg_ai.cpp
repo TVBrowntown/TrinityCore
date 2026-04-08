@@ -77,6 +77,15 @@ void BotBGAIMgr::RecordWaypointVisit(uint32 mapId, float x, float y, float z)
     wp.visitCount++;
 }
 
+void BotBGAIMgr::RecordWallHit(uint32 mapId, float x, float y)
+{
+    BGGridCell cell = MakeCell(mapId, x, y);
+    std::unique_lock lock(_lock);
+    _pendingWaypoints[cell].wallHits++;
+    // Also update live mesh for immediate avoidance
+    _waypointMesh[cell].wallHits++;
+}
+
 std::vector<BotBGAIMgr::LearnedWPResult> BotBGAIMgr::GetLearnedWaypointsNear(uint32 mapId, float x, float y, float radius)
 {
     std::vector<LearnedWPResult> result;
@@ -98,7 +107,7 @@ std::vector<BotBGAIMgr::LearnedWPResult> BotBGAIMgr::GetLearnedWaypointsNear(uin
                 float wy = float(gy) * 3.0f + 1.5f;
                 float dx = wx - x, dy = wy - y;
                 if (dx * dx + dy * dy <= radiusSq)
-                    result.push_back(LearnedWPResult{ Position(wx, wy, it->second.z), it->second.visitCount });
+                    result.push_back(LearnedWPResult{ Position(wx, wy, it->second.z), it->second.visitCount, it->second.wallHits });
             }
         }
     }
@@ -251,12 +260,28 @@ void BotBGAIMgr::LoadFromDB()
     uint32 count = 0;
 
     // Load waypoints
-    if (QueryResult result = CharacterDatabase.Query("SELECT map_id, grid_x, grid_y, z, visit_count FROM characters_npcbot_bg_waypoints"))
+    // Auto-migration: add wall_hits column if missing
+    bool hasWallHits = false;
+    {
+        QueryResult colCheck = CharacterDatabase.Query(
+            "SHOW COLUMNS FROM characters_npcbot_bg_waypoints LIKE 'wall_hits'");
+        if (colCheck && colCheck->GetRowCount() > 0)
+            hasWallHits = true;
+        else
+            CharacterDatabase.DirectExecute("ALTER TABLE characters_npcbot_bg_waypoints ADD COLUMN wall_hits INT UNSIGNED NOT NULL DEFAULT 0");
+        hasWallHits = true; // either existed or just added
+    }
+
+    if (QueryResult result = CharacterDatabase.Query(
+        hasWallHits
+            ? "SELECT map_id, grid_x, grid_y, z, visit_count, wall_hits FROM characters_npcbot_bg_waypoints"
+            : "SELECT map_id, grid_x, grid_y, z, visit_count FROM characters_npcbot_bg_waypoints"))
     {
         do {
             Field* f = result->Fetch();
             BGGridCell cell{ f[0].GetUInt16(), f[1].GetInt16(), f[2].GetInt16() };
-            _waypointMesh[cell] = BGLearnedWaypoint{ f[3].GetFloat(), f[4].GetUInt32() };
+            uint32 wallHits = hasWallHits ? f[5].GetUInt32() : 0;
+            _waypointMesh[cell] = BGLearnedWaypoint{ f[3].GetFloat(), f[4].GetUInt32(), wallHits };
             _waypointMapIds.insert(cell.mapId);
             ++count;
         } while (result->NextRow());
@@ -394,12 +419,13 @@ void BotBGAIMgr::FlushPendingData()
         {
             stored.z = (stored.z * stored.visitCount + wp.z * wp.visitCount) / (stored.visitCount + wp.visitCount);
             stored.visitCount += wp.visitCount;
+            stored.wallHits += wp.wallHits;
         }
         CharacterDatabase.PExecute(
-            "INSERT INTO characters_npcbot_bg_waypoints (map_id, grid_x, grid_y, z, visit_count) VALUES ({}, {}, {}, {}, {}) "
-            "ON DUPLICATE KEY UPDATE z = {}, visit_count = visit_count + {}",
-            cell.mapId, int32(cell.gridX), int32(cell.gridY), stored.z, wp.visitCount,
-            stored.z, wp.visitCount);
+            "INSERT INTO characters_npcbot_bg_waypoints (map_id, grid_x, grid_y, z, visit_count, wall_hits) VALUES ({}, {}, {}, {}, {}, {}) "
+            "ON DUPLICATE KEY UPDATE z = {}, visit_count = visit_count + {}, wall_hits = wall_hits + {}",
+            cell.mapId, int32(cell.gridX), int32(cell.gridY), stored.z, wp.visitCount, wp.wallHits,
+            stored.z, wp.visitCount, wp.wallHits);
     }
     _pendingWaypoints.clear();
 
@@ -408,6 +434,7 @@ void BotBGAIMgr::FlushPendingData()
     for (auto it = _waypointMesh.begin(); it != _waypointMesh.end();)
     {
         it->second.visitCount = uint32(it->second.visitCount * DECAY_FACTOR);
+        it->second.wallHits = uint32(it->second.wallHits * DECAY_FACTOR);
         if (it->second.visitCount < 2)
         {
             CharacterDatabase.PExecute(
@@ -927,6 +954,13 @@ float BotBGAIMgr::ScoreWaypointPosition(uint32 mapId, float x, float y, uint32 v
     auto hd = GetHeatmapData(mapId, x, y);
     if (hd && (hd->objCaps + hd->objDefends > 0))
         score *= 1.2f;
+
+    // Wall penalty: reduce score for cells where bots frequently hit walls
+    BGGridCell cell = MakeCell(mapId, x, y);
+    std::shared_lock lock(_lock);
+    auto it = _waypointMesh.find(cell);
+    if (it != _waypointMesh.end() && it->second.wallHits > 0)
+        score *= 1.0f / (1.0f + float(it->second.wallHits) * 0.5f);
 
     return score;
 }

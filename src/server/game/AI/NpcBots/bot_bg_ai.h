@@ -42,6 +42,7 @@ struct BGLearnedWaypoint
 {
     float z;
     uint32 visitCount;
+    uint32 wallHits{0}; // times bots hit LOS failures here — penalizes wall-adjacent paths
 };
 
 struct BGHeatmapData
@@ -244,8 +245,9 @@ public:
 
     // Waypoint mesh
     static void RecordWaypointVisit(uint32 mapId, float x, float y, float z);
+    static void RecordWallHit(uint32 mapId, float x, float y);
     // Returns positions with visit counts for weighted selection
-    struct LearnedWPResult { Position pos; uint32 visitCount; };
+    struct LearnedWPResult { Position pos; uint32 visitCount; uint32 wallHits; };
     static std::vector<LearnedWPResult> GetLearnedWaypointsNear(uint32 mapId, float x, float y, float radius);
     static bool HasLearnedWaypoints(uint32 mapId);
 
