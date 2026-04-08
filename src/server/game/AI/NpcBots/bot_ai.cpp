@@ -19418,11 +19418,20 @@ void bot_ai::Evade()
     {
         _evadeMode = true;
 
-        if (!me->isMoving())
+        // BG bots: recalculate movement while still moving for fluid motion
+        // Issue new movement command when within 5 yards of current destination
+        bool bgShouldRecalc = false;
+        if (me->GetMap()->IsBattlegroundOrArena() && me->isMoving() && !me->IsInCombat())
         {
-            ++_evadeCount;
+            bgShouldRecalc = (dist < 8.0f);
+        }
 
-            if (dist > (me->GetMap()->GetEntry()->IsContinent() ? 15.0f : INTERACTION_DISTANCE))
+        if (!me->isMoving() || bgShouldRecalc)
+        {
+            if (!me->isMoving())
+                ++_evadeCount;
+
+            if (dist > (me->GetMap()->GetEntry()->IsContinent() ? 15.0f : INTERACTION_DISTANCE) || bgShouldRecalc)
             {
                 // BG bots: skip WanderNode jump/pathing flags, use PF system directly
                 if (!me->GetMap()->IsBattlegroundOrArena() &&
@@ -19559,8 +19568,8 @@ void bot_ai::Evade()
                             blendedDirY = navCtx.finalDirY;
                         }
 
-                        // Longer step distance to reduce stop-start oscillation
-                        float moveDist = frand(30.0f, 50.0f);
+                        // Step distance: short enough for smooth recalculation, long enough for natural movement
+                        float moveDist = frand(15.0f, 25.0f);
                         pos.Relocate(
                             me->GetPositionX() + blendedDirX * moveDist,
                             me->GetPositionY() + blendedDirY * moveDist,
@@ -21847,6 +21856,16 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
                 break;
             }
 
+            // Flag status awareness
+            TeamId enemyTeamId = myTeamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+            ObjectGuid enemyFCGuid = bg->GetFlagPickerGUID(myTeamId); // enemy carrying OUR flag
+            bool enemyHasOurFlag = !enemyFCGuid.IsEmpty();
+            bool weHaveTheirFlag = !bg->GetFlagPickerGUID(enemyTeamId).IsEmpty();
+
+            // Count attackers who have died recently without capping (failed attempts)
+            // Use intention counts as proxy: many attackers broadcasting but flag not grabbed
+            uint8 curFlagAttackers = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_ATTACK_FLAG);
+
             // Role assignment: attack ratio based on momentum
             float attackRatio = 0.70f;
             if (isOpeningRush || momentum >= BG_MOMENTUM_DOMINATING) attackRatio = 0.90f;
@@ -21854,16 +21873,42 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
             else if (momentum <= BG_MOMENTUM_WIPED) attackRatio = 0.30f;
             else if (momentum <= BG_MOMENTUM_OUTNUMBERED) attackRatio = 0.50f;
 
+            // If enemy has our flag, no point defending empty base — everyone attacks/chases
+            if (enemyHasOurFlag)
+                attackRatio = 1.0f;
+
+            // If we already have their flag, more defenders to protect FC return
+            if (weHaveTheirFlag && !enemyHasOurFlag)
+                attackRatio = std::min(attackRatio, 0.40f);
+
+            // If attackers keep failing (many attackers but flag not grabbed), send reinforcements
+            if (!weHaveTheirFlag && curFlagAttackers >= 2 && curFlagAttackers < teamSize)
+                attackRatio = std::max(attackRatio, float(curFlagAttackers + 2) / float(teamSize));
+
             uint8 desiredAttackers = uint8(teamSize * attackRatio);
             uint8 desiredDefenders = teamSize - desiredAttackers;
 
             // Assign role based on what's understaffed
-            if (curDefenders < desiredDefenders && personality.caution > 0.4f)
+            if (desiredDefenders > 0 && curDefenders < desiredDefenders && personality.caution > 0.4f)
             {
                 _bgAssignedRole = 2; // defend
                 _bgObjectivePos.Relocate(myFlagX + scatterDist * std::cos(scatterAngle),
                     myFlagY + scatterDist * std::sin(scatterAngle), myFlagZ);
                 BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_DEFEND_FLAG);
+            }
+            else if (enemyHasOurFlag)
+            {
+                // Chase the enemy FC instead of going to empty base
+                _bgAssignedRole = 1;
+                // Try to find enemy FC position
+                Unit* enemyFC = ObjectAccessor::GetUnit(*me, enemyFCGuid);
+                if (enemyFC && enemyFC->IsAlive())
+                    _bgObjectivePos.Relocate(enemyFC->GetPositionX() + scatterDist * std::cos(scatterAngle),
+                        enemyFC->GetPositionY() + scatterDist * std::sin(scatterAngle), enemyFC->GetPositionZ());
+                else
+                    _bgObjectivePos.Relocate(enemyFlagX + scatterDist * std::cos(scatterAngle),
+                        enemyFlagY + scatterDist * std::sin(scatterAngle), enemyFlagZ); // head to enemy base to intercept
+                BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_ATTACK_FLAG);
             }
             else
             {
