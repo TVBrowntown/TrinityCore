@@ -194,7 +194,6 @@ public:
     WanderNode const* GetNextTravelNode(Position const* from, bool random);
     WanderNode const* GetNextBGTravelNode() const;
     WanderNode const* GetNextBGTravelNodeWithIntelligence();
-    WanderNode const* MakeSuboptimalBGDecision() const;
     void SelectBGStrategy();
     uint32 GetBGStrategy() const { return _bgCurrentStrategy; }
     std::vector<BGMatchSnapshot> const& GetMatchSnapshots() const { return _bgMatchSnapshots; }
@@ -234,11 +233,6 @@ public:
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
     uint16 GetBGMatchDeaths() const { return _bgMatchDeaths; }
-    WanderNode const* ConsultTeamPlan();
-    WanderNode const* ConsultWSGPlan(BGTeamPlan const& plan, Battleground const* bg, BotBGPersonality const& p);
-    uint8 PickBestNodeAssignment(BGTeamPlan const& plan, BotBGPersonality const& p) const;
-    WanderNode const* FindClosestNodeTo(float x, float y) const;
-
     void TeleportHomeStart(bool reset);
     void TeleportHome(bool reset);
     bool FinishTeleport(bool reset);
