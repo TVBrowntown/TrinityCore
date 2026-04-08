@@ -109,7 +109,9 @@ void BattlegroundAB::PostUpdateImpl(uint32 diff)
                     _CreateBanner(node, BG_AB_NODE_TYPE_OCCUPIED, teamIndex, true);
                     _SendNodeUpdate(node);
                     _NodeOccupied(node, (teamIndex == TEAM_ALLIANCE) ? ALLIANCE : HORDE);
-                    // Message to chatlog
+                    TC_LOG_INFO("server.worldserver", "[BG] AB: {} captured node {} (score: A:{} H:{})",
+                        (teamIndex == TEAM_ALLIANCE) ? "Alliance" : "Horde", uint32(node),
+                        m_TeamScores[TEAM_ALLIANCE], m_TeamScores[TEAM_HORDE]);
 
                     if (teamIndex == TEAM_ALLIANCE)
                     {

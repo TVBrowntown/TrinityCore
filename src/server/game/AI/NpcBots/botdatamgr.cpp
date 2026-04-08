@@ -1,6 +1,8 @@
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
+#include "DBCStores.h"
 #include "bot_ai.h"
+#include "bot_bg_ai.h"
 #include "botconfig.h"
 #include "botdatamgr.h"
 #include "botgearscore.h"
@@ -119,14 +121,14 @@ public:
 
     void AbortMe()
     {
-        BOT_LOG_ERROR("npcbots", "BotBattlegroundEnterEvent: Aborting bot {} bg {}!", _botGUID.GetEntry(), uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
+        BOT_LOG_DEBUG("npcbots", "BotBattlegroundEnterEvent: Aborting bot {} bg {}.", _botGUID.GetEntry(), uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
         sBattlegroundMgr->GetBattlegroundQueue(_bgQueueTypeId).RemovePlayer(_botGUID, true);
         BotDataMgr::DespawnWandererBot(_botGUID.GetEntry());
     }
 
     void AbortAll()
     {
-        BOT_LOG_ERROR("npcbots", "BotBattlegroundEnterEvent: Aborting ALL bots by {} bg {}!", _playerGUID.GetCounter(), uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
+        BOT_LOG_DEBUG("npcbots", "BotBattlegroundEnterEvent: Aborting ALL bots by {} bg {}.", _playerGUID.GetCounter(), uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
         AbortMe();
         botBGJoinEvents.at(_playerGUID).KillAllEvents(false);
     }
@@ -184,18 +186,115 @@ public:
     void Abort(uint64 /*e_time*/) override { AbortMe(); }
 };
 
+// Autonomous BG enter event - does not require a player to be present
+class BotAutonomousBGEnterEvent : public BasicEvent
+{
+    const ObjectGuid _ownerKey; // synthetic key for botBGJoinEvents
+    const ObjectGuid _botGUID;
+    const BattlegroundQueueTypeId _bgQueueTypeId;
+    const uint64 _removeTime;
+
+public:
+    BotAutonomousBGEnterEvent(ObjectGuid ownerKey, ObjectGuid botGUID, BattlegroundQueueTypeId bgQueueTypeId, uint64 removeTime)
+        : _ownerKey(ownerKey), _botGUID(botGUID), _bgQueueTypeId(bgQueueTypeId), _removeTime(removeTime) {}
+
+    void AbortMe()
+    {
+        BOT_LOG_DEBUG("npcbots", "BotAutonomousBGEnterEvent: Aborting bot {} bg {}.", _botGUID.GetEntry(), uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
+        sBattlegroundMgr->GetBattlegroundQueue(_bgQueueTypeId).RemovePlayer(_botGUID, true);
+        BotDataMgr::DespawnWandererBot(_botGUID.GetEntry());
+    }
+
+    void AbortAll()
+    {
+        BOT_LOG_DEBUG("npcbots", "BotAutonomousBGEnterEvent: Aborting ALL autonomous bots bg {}.", uint32(BattlegroundMgr::BGTemplateId(_bgQueueTypeId)));
+        AbortMe();
+        botBGJoinEvents.at(_ownerKey).KillAllEvents(false);
+    }
+
+    bool Execute(uint64 e_time, uint32 /*p_time*/) override
+    {
+        if (e_time >= _removeTime)
+        {
+            AbortMe();
+            return true;
+        }
+        else if (Creature const* bot = BotDataMgr::FindBot(_botGUID.GetEntry()))
+        {
+            BattlegroundQueue& queue = sBattlegroundMgr->GetBattlegroundQueue(_bgQueueTypeId);
+            BattlegroundQueue::QueuedPlayersMap::const_iterator qpm_citr = queue.m_QueuedPlayers.find(_botGUID);
+            GroupQueueInfo const* my_gqi = qpm_citr != queue.m_QueuedPlayers.cend() ? qpm_citr->second.GroupInfo : nullptr;
+            // Use BATTLEGROUND_TYPE_NONE to search all BG types (GetRandomBG may remap the type)
+            Battleground* bg = my_gqi ? sBattlegroundMgr->GetBattleground(my_gqi->IsInvitedToBGInstanceGUID, BATTLEGROUND_TYPE_NONE) : nullptr;
+
+            if (!bg)
+            {
+                BOT_LOG_DEBUG("npcbots", "BotAutonomousBGEnterEvent: bot {} no BG instance (queued:{}, invitedTo:{})",
+                    _botGUID.GetEntry(), (qpm_citr != queue.m_QueuedPlayers.cend()),
+                    my_gqi ? my_gqi->IsInvitedToBGInstanceGUID : 0);
+                AbortAll();
+                return true;
+            }
+            if (bg->GetPlayersCountByTeam(ALLIANCE) + bg->GetPlayersCountByTeam(HORDE) >= bg->GetMaxPlayersPerTeam() * 2)
+            {
+                AbortAll();
+                return true;
+            }
+
+            if (!queue.IsBotInvited(_botGUID, bg->GetInstanceID()))
+            {
+                BOT_LOG_DEBUG("npcbots", "BotAutonomousBGEnterEvent: bot {} not invited to BG {}", _botGUID.GetEntry(), bg->GetInstanceID());
+                AbortMe();
+                return true;
+            }
+
+            // Autonomous: enter regardless of whether other bots/players are already in
+            // Create the BG map if it doesn't exist yet (normally created when first player enters)
+            Map* bgMap = sMapMgr->FindMap(bg->GetMapId(), bg->GetInstanceID());
+            if (!bgMap)
+            {
+                Map* baseMap = sMapMgr->CreateBaseMap(bg->GetMapId());
+                if (baseMap && baseMap->Instanceable())
+                    bgMap = ((MapInstanced*)baseMap)->CreateBattleground(bg->GetInstanceID(), bg);
+            }
+            if (bgMap)
+            {
+                queue.RemovePlayer(bot->GetGUID(), false);
+                bot->GetBotAI()->SetBG(bg);
+                TeamId teamId = BotDataMgr::GetTeamIdForFaction(bot->GetFaction());
+                BOT_LOG_DEBUG("npcbots", "Bot {} entering {} (instance {})",
+                    bot->GetName(), bg->GetName(), bg->GetInstanceID());
+                BotMgr::TeleportBot(const_cast<Creature*>(bot), bgMap, bg->GetTeamStartPosition(teamId), true, false);
+            }
+            else
+            {
+                BOT_LOG_DEBUG("npcbots", "Bot {} waiting for map {} instance {} to be ready",
+                    bot->GetName(), bg->GetMapId(), bg->GetInstanceID());
+                // Map not ready yet, reschedule
+                botBGJoinEvents.at(_ownerKey).AddEventAtOffset(new BotAutonomousBGEnterEvent(_ownerKey, _botGUID, _bgQueueTypeId, _removeTime), 2s);
+            }
+        }
+
+        return true;
+    }
+
+    void Abort(uint64 /*e_time*/) override { AbortMe(); }
+};
+
+static uint32 _autonomousBGNextId = 1;
+
 static void SpawnWandererBot(uint32 bot_id, WanderNode const* spawnLoc, NpcBotRegistry* registry)
 {
     CreatureTemplate const& bot_template = _botsWanderCreatureTemplates.at(bot_id);
     NpcBotData const* bot_data = BotDataMgr::SelectNpcBotData(bot_id);
     NpcBotExtras const* bot_extras = BotDataMgr::SelectNpcBotExtras(bot_id);
-    Position spawnPos = spawnLoc->GetPosition();
 
     ASSERT(bot_data);
     ASSERT(bot_extras);
 
+    Position spawnPos = spawnLoc->GetPosition();
     Map* map = sMapMgr->CreateBaseMap(spawnLoc->GetMapId());
-    map->LoadGrid(spawnLoc->m_positionX, spawnLoc->m_positionY);
+    map->LoadGrid(spawnPos.m_positionX, spawnPos.m_positionY);
 
     BOT_LOG_DEBUG("npcbots", "Spawning wandering bot: {} ({}) class {} race {} fac {}, location: mapId {} {} ({})",
         bot_template.Name, bot_id, uint32(bot_extras->bclass), uint32(bot_extras->race), bot_data->faction,
@@ -617,6 +716,8 @@ void BotDataMgr::Update(uint32 diff)
     for (auto& [_, events] : botBGJoinEvents)
         events.Update(diff);
 
+    UpdateAutonomousBGs(diff);
+
     //lock is not needed here
     for (Creature const* bot : _existingBots)
     {
@@ -986,6 +1087,8 @@ void BotDataMgr::LoadNpcBots(bool spawn)
         report_inavlid_ids("Invalid NPCBots found in `characters_npcbot` table having no data in `creature_template_npcbot_extras` table!");
         invalid_ids.clear();
     }
+
+    BotBGAIMgr::LoadFromDB();
 
     allBotsLoaded = true;
 }
@@ -1842,6 +1945,11 @@ bool BotDataMgr::GenerateBattlegroundBots(Player const* groupLeader, [[maybe_unu
     ASSERT(uint32(spawned_bots_a.size()) == needed_bots_count_a);
     ASSERT(uint32(spawned_bots_h.size()) == needed_bots_count_h);
 
+    TC_LOG_INFO("server.worldserver", "[BG] Battleground popped: {} — {} bots queued (triggered by {})",
+        sBattlegroundMgr->GetBattlegroundTemplate(bgTypeId)->GetName(),
+        uint32(spawned_bots_a.size() + spawned_bots_h.size()),
+        groupLeader->GetName());
+
     botBGJoinEvents[groupLeader->GetGUID()].AddEventAtOffset([ammr = ammr, bgqTypeId = bgqTypeId, bgTypeId = bgTypeId, bracketId = bracketId]() {
         sBattlegroundMgr->ScheduleQueueUpdate(ammr, 0, bgqTypeId, bgTypeId, bracketId);
     }, Seconds(2));
@@ -1870,6 +1978,167 @@ bool BotDataMgr::GenerateBattlegroundBots(Player const* groupLeader, [[maybe_unu
     }
 
     return true;
+}
+
+void BotDataMgr::UpdateAutonomousBGs(uint32 diff)
+{
+    if (!BotCfg::IsAutonomousBGEnabled())
+        return;
+
+    if (!allBotsLoaded)
+        return;
+
+    static uint32 autonomousBGTimer = 60 * IN_MILLISECONDS; // first pop 1 minute after server start
+    static uint8 autonomousBGStartupPops = 3; // pop 3 BGs rapidly at startup (one per type)
+
+    if (autonomousBGTimer > diff)
+    {
+        autonomousBGTimer -= diff;
+        return;
+    }
+
+    // After startup burst, use normal interval. During startup, pop every 10 seconds.
+    if (autonomousBGStartupPops > 0)
+    {
+        --autonomousBGStartupPops;
+        autonomousBGTimer = 10 * IN_MILLISECONDS; // 10 second gap between startup pops
+    }
+    else
+        autonomousBGTimer = BotCfg::GetAutonomousBGIntervalMinutes() * MINUTE * IN_MILLISECONDS;
+
+    // Try all BG types in random order — skip any that are already running
+    BattlegroundTypeId bgTypes[] = { BATTLEGROUND_WS, BATTLEGROUND_AB, BATTLEGROUND_EY };
+    // Shuffle
+    for (int i = 2; i > 0; --i)
+        std::swap(bgTypes[i], bgTypes[urand(0, i)]);
+
+    BattlegroundTypeId bgTypeId = BATTLEGROUND_TYPE_NONE;
+    Battleground const* bg_template = nullptr;
+    uint32 tarteamplayers = 0;
+    PvPDifficultyEntry const* bracketEntry = nullptr;
+
+    for (BattlegroundTypeId candidateType : bgTypes)
+    {
+        bg_template = sBattlegroundMgr->GetBattlegroundTemplate(candidateType);
+        if (!bg_template)
+            continue;
+
+        tarteamplayers = BotCfg::GetBGTargetTeamPlayersCount(candidateType);
+        if (tarteamplayers == 0)
+            continue;
+
+        uint8 level = 80;
+        bracketEntry = GetBattlegroundBracketByLevel(bg_template->GetMapId(), level);
+        if (!bracketEntry)
+            continue;
+
+        // Check if already running
+        bool alreadyRunning = false;
+        auto const& all_bgs = sBattlegroundMgr->GetBgDataStore();
+        for (auto const& [bg_type_id, bg_data] : all_bgs)
+        {
+            if (bg_type_id == candidateType)
+            {
+                for (auto const& [_, bg_ptr] : bg_data.m_Battlegrounds)
+                {
+                    Battleground const* real_bg = bg_ptr.get();
+                    if (real_bg->GetInstanceID() != 0 && real_bg->GetBracketId() == bracketEntry->GetBracketId() && real_bg->GetStatus() < STATUS_WAIT_LEAVE)
+                    {
+                        alreadyRunning = true;
+                        break;
+                    }
+                }
+            }
+            if (alreadyRunning) break;
+        }
+
+        if (!alreadyRunning)
+        {
+            bgTypeId = candidateType;
+            break; // found a BG type that isn't running
+        }
+    }
+
+    if (bgTypeId == BATTLEGROUND_TYPE_NONE || !bg_template || !bracketEntry)
+        return; // all BG types are already running
+
+    uint32 minteamplayers = bg_template->GetMinPlayersPerTeam();
+    uint32 maxteamplayers = bg_template->GetMaxPlayersPerTeam();
+    RoundToInterval(tarteamplayers, minteamplayers, maxteamplayers);
+
+    BattlegroundBracketId bracketId = bracketEntry->GetBracketId();
+    BattlegroundQueueTypeId bgqTypeId = BattlegroundMgr::BGQueueTypeId(bgTypeId, 0);
+
+    // Check spare bots
+    uint32 spare_bots_a = sBotGen->GetSpareBotsCount(TEAM_ALLIANCE);
+    uint32 spare_bots_h = sBotGen->GetSpareBotsCount(TEAM_HORDE);
+
+    if (spare_bots_a < minteamplayers || spare_bots_h < minteamplayers)
+    {
+        BOT_LOG_INFO("npcbots", "UpdateAutonomousBGs: Not enough spare bots (A: {}, H: {}, min needed: {})",
+            spare_bots_a, spare_bots_h, minteamplayers);
+        return;
+    }
+
+    uint32 needed_bots_count_a = std::min<uint32>(tarteamplayers, spare_bots_a);
+    uint32 needed_bots_count_h = std::min<uint32>(tarteamplayers, spare_bots_h);
+
+    std::array<NpcBotRegistry, 2> spawned_bots;
+    auto& [spawned_bots_a, spawned_bots_h] = spawned_bots;
+    uint32 spawned_a = 0;
+    uint32 spawned_h = 0;
+
+    if (!sBotGen->GenerateWanderingBotsToSpawn(needed_bots_count_a, bg_template->GetMapId(), ALLIANCE, true, bracketEntry, &spawned_bots_a, spawned_a))
+    {
+        BOT_LOG_WARN("npcbots", "UpdateAutonomousBGs: Failed to spawn {} ALLIANCE bots for BG {}", needed_bots_count_a, uint32(bgTypeId));
+        for (NpcBotRegistry const& registry : spawned_bots)
+            for (Creature const* bot : registry)
+                DespawnWandererBot(bot->GetEntry());
+        return;
+    }
+
+    if (!sBotGen->GenerateWanderingBotsToSpawn(needed_bots_count_h, bg_template->GetMapId(), HORDE, true, bracketEntry, &spawned_bots_h, spawned_h))
+    {
+        BOT_LOG_WARN("npcbots", "UpdateAutonomousBGs: Failed to spawn {} HORDE bots for BG {}", needed_bots_count_h, uint32(bgTypeId));
+        for (NpcBotRegistry const& registry : spawned_bots)
+            for (Creature const* bot : registry)
+                DespawnWandererBot(bot->GetEntry());
+        return;
+    }
+
+    TC_LOG_INFO("server.worldserver", "[BG] Autonomous battleground popped: {} ({}v{}) — {} Alliance vs {} Horde bots queued",
+        bg_template->GetName(), spawned_a, spawned_h, spawned_a, spawned_h);
+
+    // Create a synthetic owner key for the event processor
+    ObjectGuid ownerKey = ObjectGuid::Create<HighGuid::Player>(0xF0000000 + _autonomousBGNextId++);
+
+    BattlegroundQueue& queue = sBattlegroundMgr->GetBattlegroundQueue(bgqTypeId);
+
+    // Schedule queue update
+    botBGJoinEvents[ownerKey].AddEventAtOffset([bgqTypeId = bgqTypeId, bgTypeId = bgTypeId, bracketId = bracketId]() {
+        sBattlegroundMgr->ScheduleQueueUpdate(0, 0, bgqTypeId, bgTypeId, bracketId);
+    }, Seconds(2));
+
+    // Queue all bots and set up enter events
+    for (NpcBotRegistry const& registry : spawned_bots)
+    {
+        uint32 seconds_delay = 5;
+        for (Creature const* bot : registry)
+        {
+            bot->GetBotAI()->SetBotCommandState(BOT_COMMAND_STAY);
+            bot->GetBotAI()->canUpdate = false;
+
+            const_cast<Creature*>(bot)->SetPvP(true);
+            queue.AddBotAsGroup(bot->GetGUID(), GetTeamIdForFaction(bot->GetFaction()) == TEAM_HORDE ? HORDE : ALLIANCE,
+                bgTypeId, bracketEntry, 0, false, 0, 0);
+
+            seconds_delay = std::min<uint32>(uint32(MINUTE * 2), seconds_delay + std::max<uint32>(1u, uint32((MINUTE / 2) / std::max<uint32>(needed_bots_count_a, needed_bots_count_h))));
+
+            BotAutonomousBGEnterEvent* bbe = new BotAutonomousBGEnterEvent(ownerKey, bot->GetGUID(), bgqTypeId,
+                botBGJoinEvents[ownerKey].CalculateTime(Milliseconds(uint32(INVITE_ACCEPT_WAIT_TIME) + uint32(BG_START_DELAY_2M))).count());
+            botBGJoinEvents[ownerKey].AddEventAtOffset(bbe, Seconds(seconds_delay));
+        }
+    }
 }
 
 ItemPerBotClassMap const& BotDataMgr::GetWanderingBotsSortedGearMap()
@@ -3009,7 +3278,6 @@ void BotDataMgr::RegisterBot(Creature const* bot)
     std::unique_lock lock(*GetLock());
 
     _existingBots.insert(bot);
-    //BOT_LOG_ERROR("entities.unit", "BotDataMgr::RegisterBot: registered bot {} ({})", bot->GetEntry(), bot->GetName());
 }
 void BotDataMgr::UnregisterBot(Creature const* bot)
 {
@@ -3022,7 +3290,6 @@ void BotDataMgr::UnregisterBot(Creature const* bot)
     }
 
     _existingBots.erase(bot);
-    //BOT_LOG_ERROR("entities.unit", "BotDataMgr::UnregisterBot: unregistered bot {} ({})", bot->GetEntry(), bot->GetName());
 }
 Creature const* BotDataMgr::FindBot(uint32 entry)
 {

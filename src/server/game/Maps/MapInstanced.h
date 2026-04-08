@@ -63,9 +63,11 @@ class TC_GAME_API MapInstanced : public Map
         InstancedMaps &GetInstancedMaps() { return m_InstancedMaps; }
         virtual void InitVisibilityDistance() override;
 
+    //npcbot: CreateBattleground made public for autonomous bot BGs
+    public:
+        BattlegroundMap* CreateBattleground(uint32 InstanceId, Battleground* bg);
     private:
         InstanceMap* CreateInstance(uint32 InstanceId, InstanceSave* save, Difficulty difficulty, TeamId InstanceTeam);
-        BattlegroundMap* CreateBattleground(uint32 InstanceId, Battleground* bg);
 
         InstancedMaps m_InstancedMaps;
 

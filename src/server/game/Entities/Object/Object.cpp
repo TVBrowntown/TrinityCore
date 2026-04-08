@@ -118,6 +118,23 @@ void Object::_InitValues()
     m_objectUpdated = false;
 }
 
+void Object::_ExpandValues(uint32 newCount)
+{
+    if (newCount <= m_valuesCount)
+        return;
+    if (!m_uint32Values)
+        return;
+
+    uint32* newValues = new uint32[newCount];
+    memset(newValues, 0, newCount * sizeof(uint32));
+    memcpy(newValues, m_uint32Values, m_valuesCount * sizeof(uint32));
+    delete[] m_uint32Values;
+    m_uint32Values = newValues;
+
+    _changesMask.SetCount(newCount);
+    m_valuesCount = newCount;
+}
+
 void Object::_Create(ObjectGuid::LowType guidlow, uint32 entry, HighGuid guidhigh)
 {
     if (!m_uint32Values) _InitValues();

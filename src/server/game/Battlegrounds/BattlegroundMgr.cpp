@@ -1118,6 +1118,7 @@ void BattlegroundMgr::AddBattleground(Battleground* bg)
 {
     if (bg)
     {
+        // Diagnostic logging removed — BG pop/end messages are sufficient
         Trinity::unique_trackable_ptr<Battleground>& ptr = bgDataStore[bg->GetTypeID()].m_Battlegrounds[bg->GetInstanceID()];
         ptr.reset(bg);
         bg->SetWeakPtr(ptr);

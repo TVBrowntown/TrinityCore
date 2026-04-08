@@ -24,6 +24,9 @@
 #include "Spell.h"
 #include "AccountMgr.h"
 #include "Battleground.h"
+//npcbot
+#include "bot_ai.h"
+//end npcbot
 #include "Chat.h"
 #include "CellImpl.h"
 #include "Common.h"
@@ -2129,6 +2132,29 @@ void Spell::EffectOpenLock()
 {
     if (effectHandleMode != SPELL_EFFECT_HANDLE_HIT_TARGET)
         return;
+
+    //npcbot: handle BG flag/banner opening for bot creatures
+    if (m_caster->GetTypeId() != TYPEID_PLAYER && m_caster->IsNPCBot() && gameObjTarget)
+    {
+        Creature* bot = m_caster->ToCreature();
+        if (bot && bot->GetBotAI())
+        {
+            Battleground* bg = bot->GetBotAI()->GetBG();
+            if (bg)
+            {
+                GameObjectTemplate const* goInfo = gameObjTarget->GetGOInfo();
+                if ((goInfo->type == GAMEOBJECT_TYPE_BUTTON && goInfo->button.noDamageImmune) ||
+                    (goInfo->type == GAMEOBJECT_TYPE_GOOBER && goInfo->goober.losOK) ||
+                    goInfo->type == GAMEOBJECT_TYPE_FLAGSTAND)
+                {
+                    bg->EventBotClickedOnFlag(bot, gameObjTarget);
+                }
+                return;
+            }
+        }
+        return;
+    }
+    //end npcbot
 
     if (m_caster->GetTypeId() != TYPEID_PLAYER)
     {

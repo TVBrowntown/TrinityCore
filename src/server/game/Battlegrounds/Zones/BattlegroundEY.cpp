@@ -182,20 +182,30 @@ void BattlegroundEY::CheckSomeoneJoinedPoint()
             uint8 j = 0;
             while (j < m_PlayersNearPoint[EY_POINTS_MAX].size())
             {
-                Player* player = ObjectAccessor::FindPlayer(m_PlayersNearPoint[EY_POINTS_MAX][j]);
-                if (!player)
+                ObjectGuid const& guid = m_PlayersNearPoint[EY_POINTS_MAX][j];
+                Player* player = ObjectAccessor::FindPlayer(guid);
+                //npcbot: also check for bot creatures
+                WorldObject* participant = player;
+                if (!participant && guid.IsCreature())
+                    participant = GetBgMap()->GetCreature(guid);
+                //end npcbot
+                if (!participant)
                 {
-                    TC_LOG_ERROR("bg.battleground", "BattlegroundEY:CheckSomeoneJoinedPoint: Player ({}) could not be found!", m_PlayersNearPoint[EY_POINTS_MAX][j].ToString());
+                    TC_LOG_ERROR("bg.battleground", "BattlegroundEY:CheckSomeoneJoinedPoint: Player/Bot ({}) could not be found!", guid.ToString());
                     ++j;
                     continue;
                 }
-                if (player->CanCaptureTowerPoint() && player->IsWithinDistInMap(obj, BG_EY_POINT_RADIUS))
+                bool canCapture = player ? player->CanCaptureTowerPoint() : participant->ToCreature()->IsAlive();
+                if (canCapture && participant->IsWithinDistInMap(obj, BG_EY_POINT_RADIUS))
                 {
                     //player joined point!
                     //show progress bar
-                    player->SendUpdateWorldState(PROGRESS_BAR_PERCENT_GREY, BG_EY_PROGRESS_BAR_PERCENT_GREY);
-                    player->SendUpdateWorldState(PROGRESS_BAR_STATUS, m_PointBarStatus[i]);
-                    player->SendUpdateWorldState(PROGRESS_BAR_SHOW, BG_EY_PROGRESS_BAR_SHOW);
+                    if (player)
+                    {
+                        player->SendUpdateWorldState(PROGRESS_BAR_PERCENT_GREY, BG_EY_PROGRESS_BAR_PERCENT_GREY);
+                        player->SendUpdateWorldState(PROGRESS_BAR_STATUS, m_PointBarStatus[i]);
+                        player->SendUpdateWorldState(PROGRESS_BAR_SHOW, BG_EY_PROGRESS_BAR_SHOW);
+                    }
                     //add player to point
                     m_PlayersNearPoint[i].push_back(m_PlayersNearPoint[EY_POINTS_MAX][j]);
                     //remove player from "free space"
@@ -223,26 +233,37 @@ void BattlegroundEY::CheckSomeoneLeftPoint()
             uint8 j = 0;
             while (j < m_PlayersNearPoint[i].size())
             {
-                Player* player = ObjectAccessor::FindPlayer(m_PlayersNearPoint[i][j]);
-                if (!player)
+                ObjectGuid const& guid = m_PlayersNearPoint[i][j];
+                Player* player = ObjectAccessor::FindPlayer(guid);
+                //npcbot: also check for bot creatures
+                WorldObject* participant = player;
+                if (!participant && guid.IsCreature())
+                    participant = GetBgMap()->GetCreature(guid);
+                //end npcbot
+                if (!participant)
                 {
-                    TC_LOG_ERROR("bg.battleground", "BattlegroundEY:CheckSomeoneLeftPoint Player ({}) could not be found!", m_PlayersNearPoint[i][j].ToString());
+                    TC_LOG_ERROR("bg.battleground", "BattlegroundEY:CheckSomeoneLeftPoint Player/Bot ({}) could not be found!", guid.ToString());
                     //move non-existing players to "free space" - this will cause many errors showing in log, but it is a very important bug
                     m_PlayersNearPoint[EY_POINTS_MAX].push_back(m_PlayersNearPoint[i][j]);
                     m_PlayersNearPoint[i].erase(m_PlayersNearPoint[i].begin() + j);
                     continue;
                 }
-                if (!player->CanCaptureTowerPoint() || !player->IsWithinDistInMap(obj, BG_EY_POINT_RADIUS))
+                bool canCapture = player ? player->CanCaptureTowerPoint() : participant->ToCreature()->IsAlive();
+                if (!canCapture || !participant->IsWithinDistInMap(obj, BG_EY_POINT_RADIUS))
                     //move player out of point (add him to players that are out of points
                 {
                     m_PlayersNearPoint[EY_POINTS_MAX].push_back(m_PlayersNearPoint[i][j]);
                     m_PlayersNearPoint[i].erase(m_PlayersNearPoint[i].begin() + j);
-                    player->SendUpdateWorldState(PROGRESS_BAR_SHOW, BG_EY_PROGRESS_BAR_DONT_SHOW);
+                    if (player)
+                        player->SendUpdateWorldState(PROGRESS_BAR_SHOW, BG_EY_PROGRESS_BAR_DONT_SHOW);
                 }
                 else
                 {
-                    //player is neat flag, so update count:
-                    m_CurrentPointPlayersCount[2 * i + GetTeamIndexByTeamId(player->GetTeam())]++;
+                    //player is near flag, so update count:
+                    //npcbot: use GetBotTeamId for creature GUIDs
+                    TeamId teamIdx = player ? GetTeamIndexByTeamId(player->GetTeam()) : GetBotTeamId(guid);
+                    m_CurrentPointPlayersCount[2 * i + teamIdx]++;
+                    //end npcbot
                     ++j;
                 }
             }
@@ -277,7 +298,13 @@ void BattlegroundEY::UpdatePointStatuses()
 
         for (uint8 i = 0; i < m_PlayersNearPoint[point].size(); ++i)
         {
-            Player* player = ObjectAccessor::FindPlayer(m_PlayersNearPoint[point][i]);
+            ObjectGuid const& guid = m_PlayersNearPoint[point][i];
+            Player* player = ObjectAccessor::FindPlayer(guid);
+            //npcbot: also check for bot creatures
+            Creature* bot = nullptr;
+            if (!player && guid.IsCreature())
+                bot = GetBgMap()->GetCreature(guid);
+            //end npcbot
             if (player)
             {
                 player->SendUpdateWorldState(PROGRESS_BAR_STATUS, m_PointBarStatus[point]);
@@ -299,6 +326,20 @@ void BattlegroundEY::UpdatePointStatuses()
                         if (player->GetDistance(2044.0f, 1729.729f, 1190.03f) < 3.0f)
                             EventPlayerCapturedFlag(player, BG_EY_OBJECT_FLAG_FEL_REAVER);
             }
+            //npcbot: handle bot capture/loss events
+            else if (bot)
+            {
+                uint32 botTeam = GetBotTeam(guid);
+                if (pointOwnerTeamId != m_PointOwnedByTeam[point])
+                {
+                    if (m_PointState[point] == EY_POINT_STATE_UNCONTROLLED && botTeam == pointOwnerTeamId)
+                        EventBotTeamCapturedPoint(bot, point);
+
+                    if (m_PointState[point] == EY_POINT_UNDER_CONTROL && botTeam != m_PointOwnedByTeam[point])
+                        EventBotTeamLostPoint(bot, point);
+                }
+            }
+            //end npcbot
         }
     }
 }

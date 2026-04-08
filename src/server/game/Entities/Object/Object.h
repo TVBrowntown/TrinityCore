@@ -166,6 +166,7 @@ class TC_GAME_API Object
         virtual bool hasQuest(uint32 /* quest_id */) const { return false; }
         virtual bool hasInvolvedQuest(uint32 /* quest_id */) const { return false; }
         void SetIsNewObject(bool enable) { m_isNewObject = enable; }
+        bool IsNewObject() const { return m_isNewObject; }
         virtual void BuildUpdate(UpdateDataMapType&) { }
         void BuildFieldsUpdate(Player*, UpdateDataMapType &) const;
 
@@ -236,6 +237,7 @@ class TC_GAME_API Object
         Object();
 
         void _InitValues();
+        void _ExpandValues(uint32 newCount);
         void _Create(ObjectGuid::LowType guidlow, uint32 entry, HighGuid guidhigh);
         std::string _ConcatFields(uint16 startIndex, uint16 size) const;
         [[nodiscard]] bool _LoadIntoDataField(std::string const& data, uint32 startOffset, uint32 count);

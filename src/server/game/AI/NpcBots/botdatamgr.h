@@ -230,6 +230,7 @@ public:
     static void LoadWanderMap(bool reload = false, bool force_all_maps = false);
     static void GenerateWanderingBots();
     static bool GenerateBattlegroundBots(Player const* groupLeader, Group const* group, BattlegroundQueue* queue, PvPDifficultyEntry const* bracketEntry, GroupQueueInfo const* gqinfo);
+    static void UpdateAutonomousBGs(uint32 diff);
     static void CreateWanderingBotsSortedGear();
     static ItemPerBotClassMap const& GetWanderingBotsSortedGearMap();
     static Item* GenerateWanderingBotItem(uint8 slot, uint8 botclass, uint8 level, std::function<bool(uint8, ItemTemplate const*)> const& check);

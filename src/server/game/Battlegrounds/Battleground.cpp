@@ -53,6 +53,7 @@
 #include <cstdarg>
 //npcbot
 #include "bot_ai.h"
+#include "bot_bg_ai.h"
 #include "botdatamgr.h"
 #include "botmgr.h"
 //end npcbot
@@ -192,10 +193,9 @@ void Battleground::Update(uint32 diff)
 
     if (!PreUpdateImpl(diff))
         return;
-    //npcbot
-    if (m_Bots.empty())
+    //npcbot: don't delete BG if bots are present OR if bots are still joining (first 60 seconds)
+    if (m_Bots.empty() && GetStartTime() > 60 * IN_MILLISECONDS)
     //end npcbot
-
     if (!GetPlayersSize())
     {
         //BG is empty
@@ -216,10 +216,12 @@ void Battleground::Update(uint32 diff)
     switch (GetStatus())
     {
         case STATUS_WAIT_JOIN:
-            if (GetPlayersSize())
+            //npcbot: process join for bot-only BGs too (bots count as participants)
+            if (GetPlayersSize() || !m_Bots.empty())
             {
                 _ProcessJoin(diff);
-                _CheckSafePositions(diff);
+                if (GetPlayersSize())
+                    _CheckSafePositions(diff);
             }
             break;
         case STATUS_IN_PROGRESS:
@@ -236,10 +238,25 @@ void Battleground::Update(uint32 diff)
             else
             {
                 _ProcessResurrect(diff);
-                if (sBattlegroundMgr->GetPrematureFinishTime() && (GetPlayersCountByTeam(ALLIANCE) < GetMinPlayersPerTeam() || GetPlayersCountByTeam(HORDE) < GetMinPlayersPerTeam()))
-                    _ProcessProgress(diff);
-                else if (m_PrematureCountDown)
-                    m_PrematureCountDown = false;
+                //npcbot: count bots as participants for premature finish check
+                // Skip premature check for first 30 seconds to allow bots to teleport in
+                if (GetStartTime() > 30 * IN_MILLISECONDS)
+                {
+                    uint32 allianceCount = GetPlayersCountByTeam(ALLIANCE);
+                    uint32 hordeCount = GetPlayersCountByTeam(HORDE);
+                    for (auto const& [guid, botData] : m_Bots)
+                    {
+                        if (botData.Team == ALLIANCE)
+                            ++allianceCount;
+                        else
+                            ++hordeCount;
+                    }
+                    if (sBattlegroundMgr->GetPrematureFinishTime() && (allianceCount < GetMinPlayersPerTeam() || hordeCount < GetMinPlayersPerTeam()))
+                        _ProcessProgress(diff);
+                    else if (m_PrematureCountDown)
+                        m_PrematureCountDown = false;
+                }
+                //end npcbot
             }
             break;
         case STATUS_WAIT_LEAVE:
@@ -414,10 +431,21 @@ inline void Battleground::_ProcessResurrect(uint32 diff)
 uint32 Battleground::GetPrematureWinner()
 {
     uint32 winner = 0;
-    if (GetPlayersCountByTeam(ALLIANCE) >= GetMinPlayersPerTeam())
+    //npcbot: count bots as participants
+    uint32 allianceCount = GetPlayersCountByTeam(ALLIANCE);
+    uint32 hordeCount = GetPlayersCountByTeam(HORDE);
+    for (auto const& [guid, botData] : m_Bots)
+    {
+        if (botData.Team == ALLIANCE)
+            ++allianceCount;
+        else
+            ++hordeCount;
+    }
+    if (allianceCount >= GetMinPlayersPerTeam())
         winner = ALLIANCE;
-    else if (GetPlayersCountByTeam(HORDE) >= GetMinPlayersPerTeam())
+    else if (hordeCount >= GetMinPlayersPerTeam())
         winner = HORDE;
+    //end npcbot
 
     return winner;
 }
@@ -854,6 +882,122 @@ void Battleground::EndBattleground(uint32 winner)
             }
         }
     }
+    //npcbot: record BG strategy outcomes for learning
+    for (bitr = m_Bots.begin(); bitr != m_Bots.end(); ++bitr)
+    {
+        if (bitr->first.IsCreature())
+        {
+            if (Creature const* bot = BotDataMgr::FindBot(bitr->first.GetEntry()))
+            {
+                if (bot->GetBotAI())
+                {
+                    uint32 strat = bot->GetBotAI()->GetBGStrategy();
+                    if (strat < BG_STRATEGY_MAX)
+                    {
+                        bool won = (GetBotTeamId(bot->GetGUID()) == TEAM_ALLIANCE && winner == ALLIANCE) ||
+                                   (GetBotTeamId(bot->GetGUID()) == TEAM_HORDE && winner == HORDE);
+                        BotBGAIMgr::RecordStrategyOutcome(GetMapId(), strat, won);
+                    }
+                }
+            }
+        }
+    }
+    //npcbot: BG end summary + flush learning data
+    {
+        char const* winnerName = winner == ALLIANCE ? "Alliance" : winner == HORDE ? "Horde" : "Draw";
+        uint32 scoreA = GetTeamScore(TEAM_ALLIANCE);
+        uint32 scoreH = GetTeamScore(TEAM_HORDE);
+        uint32 playersA = GetPlayersCountByTeam(ALLIANCE);
+        uint32 playersH = GetPlayersCountByTeam(HORDE);
+        uint32 botsA = 0, botsH = 0;
+        for (auto const& [guid, botData] : m_Bots)
+        {
+            if (botData.Team == ALLIANCE)
+                ++botsA;
+            else
+                ++botsH;
+        }
+        TC_LOG_INFO("server.worldserver", "[BG] {} ended: {} wins! Score: Alliance {} - Horde {} (Players: {}v{}, Bots: {}v{})",
+            GetName(), winnerName, scoreA, scoreH, playersA, playersH, botsA, botsH);
+    }
+    // Detect enemy dominant strategy per team
+    {
+        uint32 allianceStratCounts[BG_STRATEGY_MAX] = {};
+        uint32 hordeStratCounts[BG_STRATEGY_MAX] = {};
+        for (auto const& [guid, botData] : m_Bots)
+        {
+            Creature const* bot = BotDataMgr::FindBot(guid.GetEntry());
+            if (!bot || !bot->GetBotAI()) continue;
+            uint32 strat = bot->GetBotAI()->GetBGStrategy();
+            if (strat >= BG_STRATEGY_MAX) continue;
+            if (botData.Team == ALLIANCE) ++allianceStratCounts[strat];
+            else ++hordeStratCounts[strat];
+        }
+        uint32 allianceDominant = 0, hordeDominant = 0;
+        uint32 aMax = 0, hMax = 0;
+        for (uint32 i = 0; i < BG_STRATEGY_MAX; ++i)
+        {
+            if (allianceStratCounts[i] > aMax) { aMax = allianceStratCounts[i]; allianceDominant = i; }
+            if (hordeStratCounts[i] > hMax) { hMax = hordeStratCounts[i]; hordeDominant = i; }
+        }
+
+        // Record counter-strategy outcomes + win condition snapshots
+        for (auto const& [guid, botData] : m_Bots)
+        {
+            Creature const* bot = BotDataMgr::FindBot(guid.GetEntry());
+            if (!bot || !bot->GetBotAI()) continue;
+            uint32 strat = bot->GetBotAI()->GetBGStrategy();
+            if (strat >= BG_STRATEGY_MAX) continue;
+
+            bool won = (GetBotTeamId(guid) == TEAM_ALLIANCE && winner == ALLIANCE) ||
+                       (GetBotTeamId(guid) == TEAM_HORDE && winner == HORDE);
+
+            // Counter-strategy: my strategy vs their dominant
+            uint32 enemyDominant = (botData.Team == ALLIANCE) ? hordeDominant : allianceDominant;
+            BotBGAIMgr::RecordCounterStrategyOutcome(GetMapId(), strat, enemyDominant, won);
+
+            // Win condition snapshots
+            for (auto const& snap : bot->GetBotAI()->GetMatchSnapshots())
+            {
+                BotBGAIMgr::RecordWinConditionSnapshot(GetMapId(), snap.timeBracket, snap.nodesHeld, snap.scoreBracket, won);
+            }
+        }
+    }
+    // Q-learning: update Q-values for all bots based on match outcome
+    for (auto const& [guid, botData] : m_Bots)
+    {
+        Creature const* bot = BotDataMgr::FindBot(guid.GetEntry());
+        if (!bot || !bot->GetBotAI()) continue;
+
+        bool won = (GetBotTeamId(guid) == TEAM_ALLIANCE && winner == ALLIANCE) ||
+                   (GetBotTeamId(guid) == TEAM_HORDE && winner == HORDE);
+
+        uint32 myScore = GetTeamScore(GetBotTeamId(guid));
+        uint32 enemyScore = GetTeamScore(GetOtherTeamId(GetBotTeamId(guid)));
+        int32 scoreDiff = int32(myScore) - int32(enemyScore);
+
+        float reward = won ? 1.0f : -0.5f;
+        reward += float(bot->GetBotAI()->GetBGMatchKills()) * 0.1f;
+        reward -= float(bot->GetBotAI()->GetBGMatchDeaths()) * 0.15f;
+        reward += float(bot->GetBotAI()->GetBGObjectiveCaps()) * 0.3f;
+        reward += float(scoreDiff) * 0.01f;
+        reward = std::clamp(reward, -2.0f, 3.0f);
+
+        BotBGAIMgr::UpdateQValues(bot->GetBotAI()->GetQEpisode(), reward);
+    }
+    BotBGAIMgr::IncrementQGamesPlayed();
+
+    BotBGAIMgr::FlushPendingData();
+    BotBGAIMgr::FlushQTableToDB();
+    BotBGAIMgr::ClearSharedEnemyBehavior(GetInstanceID());
+    BotBGAIMgr::ClearFocusTarget(GetInstanceID(), TEAM_ALLIANCE);
+    BotBGAIMgr::ClearFocusTarget(GetInstanceID(), TEAM_HORDE);
+    BotBGAIMgr::CleanupExpiredFocusTargets();
+    BotBGAIMgr::ClearTeamPlan(GetInstanceID());
+    BotBGAIMgr::ClearEnemySightings(GetInstanceID());
+    BotBGAIMgr::ClearPresenceGrid(GetInstanceID());
+    BotBGAIMgr::ClearIntentions(GetInstanceID());
+    BotBGAIMgr::ClearCooldowns(GetInstanceID());
     //end npcbot
     for (BattlegroundPlayerMap::iterator itr = m_Players.begin(); itr != m_Players.end(); ++itr)
     {
@@ -1853,10 +1997,7 @@ Creature* Battleground::GetBGCreature(uint32 type, bool logError)
     if (!creature)
     {
         if (logError)
-            TC_LOG_ERROR("bg.battleground", "Battleground::GetBGCreature: creature (type: {}, {}) not found for BG (map: {}, instance id: {})!",
-                type, BgCreatures[type].ToString(), m_MapId, m_InstanceID);
-        else
-            TC_LOG_INFO("bg.battleground", "Battleground::GetBGCreature: creature (type: {}, {}) not found for BG (map: {}, instance id: {})!",
+            TC_LOG_DEBUG("bg.battleground", "Battleground::GetBGCreature: creature (type: {}, {}) not found for BG (map: {}, instance id: {})!",
                 type, BgCreatures[type].ToString(), m_MapId, m_InstanceID);
     }
     return creature;

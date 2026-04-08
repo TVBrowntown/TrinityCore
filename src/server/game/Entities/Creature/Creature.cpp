@@ -67,6 +67,7 @@ CreatureMovementData::CreatureMovementData() : Ground(CreatureGroundMovementType
 Random(CreatureRandomMovementType::Walk), InteractionPauseTimer(sWorld->getIntConfig(CONFIG_CREATURE_STOP_FOR_PLAYER)) { }
 //npcbot
 #include "bot_ai.h"
+#include "botcommon.h"
 #include "botdatamgr.h"
 #include "botmgr.h"
 #include "bpet_ai.h"
@@ -3795,6 +3796,32 @@ void Creature::ExitVehicle(Position const* /*exitPosition*/)
         SetHomePosition(GetPosition());
 }
 //NPCBOT
+void Creature::BuildCreateUpdateBlockForPlayer(UpdateData* data, Player* target) const
+{
+    if (!IsNPCBot() || IsNPCBotPet())
+    {
+        Object::BuildCreateUpdateBlockForPlayer(data, target);
+        return;
+    }
+
+    if (!target)
+        return;
+
+    uint8  updateType = IsNewObject() ? UPDATETYPE_CREATE_OBJECT2 : UPDATETYPE_CREATE_OBJECT;
+    uint16 flags      = m_updateFlag;
+
+    if (GetVictim())
+        flags |= UPDATEFLAG_HAS_TARGET;
+
+    ByteBuffer& buf = data->GetBuffer();
+    buf << uint8(updateType);
+    buf << GetPackGUID();
+    buf << uint8(TYPEID_PLAYER); // NPCBot: client sees this as a player
+    BuildMovementUpdate(&buf, flags);
+    BuildValuesUpdate(updateType, &buf, target);
+    data->AddUpdateBlock();
+}
+
 bool Creature::LoadBotCreatureFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, bool generated, uint32 entry, Position const* pos)
 {
     CreatureData const* data = generated ? nullptr : sObjectMgr->GetCreatureData(spawnId);
@@ -3842,6 +3869,37 @@ bool Creature::LoadBotCreatureFromDB(ObjectGuid::LowType spawnId, Map* map, bool
     m_corpseDelay = 0;
     m_respawnDelay = 0;
     setActive(true);
+
+    // NPCBot: Expand values to PLAYER_END and populate player fields so client renders as player
+    if (IsNPCBot() && !IsNPCBotPet())
+    {
+        uint32 botEntry = GetEntry();
+        NpcBotExtras const* extras = BotDataMgr::SelectNpcBotExtras(botEntry);
+        // Only apply to humanoid bot classes (exclude Sphynx etc.)
+        if (extras && ((1 << extras->bclass) & HUMANOID_BOT_CLASSES_MASK))
+        {
+            _ExpandValues(PLAYER_END);
+
+            // Set TYPEMASK_PLAYER in wire field only — m_objectType stays unchanged for server-side checks
+            SetUInt32Value(OBJECT_FIELD_TYPE, m_objectType | TYPEMASK_PLAYER);
+
+            // Populate appearance from database
+            if (NpcBotAppearanceData const* appearance = BotDataMgr::SelectNpcBotAppearance(botEntry))
+            {
+                SetUInt32Value(PLAYER_BYTES,
+                    uint32(appearance->skin) | (uint32(appearance->face) << 8) |
+                    (uint32(appearance->hair) << 16) | (uint32(appearance->haircolor) << 24));
+                SetUInt32Value(PLAYER_BYTES_2, uint32(appearance->features));
+                SetUInt32Value(PLAYER_BYTES_3, uint32(appearance->gender));
+            }
+
+            // Remove NPC flags so right-click shows player interaction menu
+            ReplaceAllNpcFlags(UNIT_NPC_FLAG_NONE);
+
+            // Clear player flags
+            SetUInt32Value(PLAYER_FLAGS, 0);
+        }
+    }
 
     if (addToMap && !GetMap()->AddToMap(this))
         return false;

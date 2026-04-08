@@ -131,6 +131,8 @@ static bool _enableclass_wander_cryptlord;
 static bool _enrageOnDismiss;
 static bool _botStatLimits;
 static bool _enableWanderingBotsBG;
+static bool _enableAutonomousBGs;
+static uint32 _autonomousBGIntervalMinutes;
 static bool _enableConfigLevelCapBG;
 static bool _enableConfigLevelCapBGFirst;
 static bool _bothk_enable;
@@ -423,6 +425,8 @@ private:
         _killrewardWandererItemQuality  = sConfigMgr->GetIntDefault("NpcBot.WanderingBots.KillReward.ItemQuality", int(ITEM_QUALITY_RARE));
         _mult_xpgain_wanderer           = sConfigMgr->GetFloatDefault("NpcBot.WanderingBots.Continents.XPGain", 1.0f);
         _enableWanderingBotsBG          = sConfigMgr->GetBoolDefault("NpcBot.WanderingBots.BG.Enable", false);
+        _enableAutonomousBGs            = sConfigMgr->GetBoolDefault("NpcBot.WanderingBots.BG.Autonomous", false);
+        _autonomousBGIntervalMinutes    = sConfigMgr->GetIntDefault("NpcBot.WanderingBots.BG.Autonomous.IntervalMinutes", 5);
         _enableConfigLevelCapBG         = sConfigMgr->GetBoolDefault("NpcBot.WanderingBots.BG.CapLevel", false);
         _enableConfigLevelCapBGFirst    = sConfigMgr->GetBoolDefault("NpcBot.WanderingBots.BG.CapLevelByFirstPlayer", false);
         _targetBGPlayersPerTeamCount_AV = sConfigMgr->GetIntDefault("NpcBot.WanderingBots.BG.TargetTeamPlayersCount.AV", 30);
@@ -952,6 +956,14 @@ bool BotCfg::FilterRaces()
 bool BotCfg::IsBotGenerationEnabledBGs()
 {
     return _enableWanderingBotsBG;
+}
+bool BotCfg::IsAutonomousBGEnabled()
+{
+    return _enableAutonomousBGs;
+}
+uint32 BotCfg::GetAutonomousBGIntervalMinutes()
+{
+    return _autonomousBGIntervalMinutes;
 }
 bool BotCfg::IsBotLevelCappedByConfigBG()
 {

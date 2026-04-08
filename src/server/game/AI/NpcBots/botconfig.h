@@ -61,6 +61,8 @@ public:
     static bool IsFoodInterruptedByMovement();
     static bool FilterRaces();
     static bool IsBotGenerationEnabledBGs();
+    static bool IsAutonomousBGEnabled();
+    static uint32 GetAutonomousBGIntervalMinutes();
     static bool IsBotLevelCappedByConfigBG();
     static bool IsBotLevelCappedByConfigBGFirstPlayer();
     static bool IsBotGenerationEnabledWorldMapId(uint32 mapId);

@@ -17,6 +17,7 @@
 
 #include "BattlegroundWS.h"
 #include "BattlegroundMgr.h"
+#include "Creature.h"
 #include "DBCStores.h"
 #include "GameObject.h"
 #include "Log.h"
@@ -88,7 +89,7 @@ void BattlegroundWS::PostUpdateImpl(uint32 diff)
 {
     if (GetStatus() == STATUS_IN_PROGRESS)
     {
-        if (GetStartTime() >= 27*MINUTE*IN_MILLISECONDS)
+        if (GetStartTime() >= 27*MINUTE*IN_MILLISECONDS) // 2 min prep + 25 min game
         {
             if (GetTeamScore(TEAM_ALLIANCE) == 0)
             {
@@ -165,25 +166,34 @@ void BattlegroundWS::PostUpdateImpl(uint32 diff)
             if (_flagDebuffState == 0 && _flagSpellForceTimer >= 10*MINUTE*IN_MILLISECONDS)  //10 minutes
             {
                 // Apply Stage 1 (Focused Assault)
-                if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[0]))
-                    player->CastSpell(player, WS_SPELL_FOCUSED_ASSAULT, true);
-                if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[1]))
-                    player->CastSpell(player, WS_SPELL_FOCUSED_ASSAULT, true);
+                //npcbot: support bot flag carriers
+                for (uint8 fi = 0; fi < 2; ++fi)
+                {
+                    Unit* flagCarrier = ObjectAccessor::FindPlayer(m_FlagKeepers[fi]);
+                    if (!flagCarrier && m_FlagKeepers[fi].IsCreature())
+                        flagCarrier = GetBgMap()->GetCreature(m_FlagKeepers[fi]);
+                    if (flagCarrier)
+                        flagCarrier->CastSpell(flagCarrier, WS_SPELL_FOCUSED_ASSAULT, true);
+                }
+                //end npcbot
                 _flagDebuffState = 1;
             }
             else if (_flagDebuffState == 1 && _flagSpellForceTimer >= 15*MINUTE*IN_MILLISECONDS) //15 minutes
             {
                 // Apply Stage 2 (Brutal Assault)
-                if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[0]))
+                //npcbot: support bot flag carriers
+                for (uint8 fi = 0; fi < 2; ++fi)
                 {
-                    player->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
-                    player->CastSpell(player, WS_SPELL_BRUTAL_ASSAULT, true);
+                    Unit* flagCarrier = ObjectAccessor::FindPlayer(m_FlagKeepers[fi]);
+                    if (!flagCarrier && m_FlagKeepers[fi].IsCreature())
+                        flagCarrier = GetBgMap()->GetCreature(m_FlagKeepers[fi]);
+                    if (flagCarrier)
+                    {
+                        flagCarrier->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
+                        flagCarrier->CastSpell(flagCarrier, WS_SPELL_BRUTAL_ASSAULT, true);
+                    }
                 }
-                if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[1]))
-                {
-                    player->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
-                    player->CastSpell(player, WS_SPELL_BRUTAL_ASSAULT, true);
-                }
+                //end npcbot
                 _flagDebuffState = 2;
             }
         }
@@ -193,16 +203,19 @@ void BattlegroundWS::PostUpdateImpl(uint32 diff)
             // Both flags are in base or awaiting respawn.
             // Remove assault debuffs, reset timers
 
-            if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[0]))
+            //npcbot: support bot flag carriers
+            for (uint8 fi = 0; fi < 2; ++fi)
             {
-                player->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
-                player->RemoveAurasDueToSpell(WS_SPELL_BRUTAL_ASSAULT);
+                Unit* flagCarrier = ObjectAccessor::FindPlayer(m_FlagKeepers[fi]);
+                if (!flagCarrier && m_FlagKeepers[fi].IsCreature())
+                    flagCarrier = GetBgMap()->GetCreature(m_FlagKeepers[fi]);
+                if (flagCarrier)
+                {
+                    flagCarrier->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
+                    flagCarrier->RemoveAurasDueToSpell(WS_SPELL_BRUTAL_ASSAULT);
+                }
             }
-            if (Player* player = ObjectAccessor::FindPlayer(m_FlagKeepers[1]))
-            {
-                player->RemoveAurasDueToSpell(WS_SPELL_FOCUSED_ASSAULT);
-                player->RemoveAurasDueToSpell(WS_SPELL_BRUTAL_ASSAULT);
-            }
+            //end npcbot
 
             _flagSpellForceTimer = 0; //reset timer.
             _flagDebuffState = 0;

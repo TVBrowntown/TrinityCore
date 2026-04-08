@@ -3,6 +3,7 @@
 
 #include "bot_ai.h"
 #include "botspell.h"
+#include "Map.h"
 #include "Corpse.h"
 #include "Creature.h"
 #include "DBCStores.h"
@@ -130,6 +131,9 @@ class NearestHostileUnitCheck
             //    return false;
             if (!AttackCCed && (u->HasUnitState(UNIT_STATE_CONFUSED | UNIT_STATE_STUNNED | UNIT_STATE_FLEEING | UNIT_STATE_DISTRACTED | UNIT_STATE_CONFUSED_MOVE | UNIT_STATE_FLEEING_MOVE)))
                 return INVALID;//do not allow CCed units if checked
+            // BG: don't break allies' breakable CC (polymorph, sap, hex, freezing trap, etc.)
+            if (me->GetMap()->IsBattlegroundOrArena() && bot_ai::HasBreakableCC(u) && !u->IsInCombatWith(me))
+                return INVALID;
             //if (u->HasUnitState(UNIT_STATE_CASTING) && (u->IsPlayer() || u->IsPet()))
             //    for (uint8 i = 0; i != CURRENT_MAX_SPELL; ++i)
             //        if (Spell* spell = u->GetCurrentSpell(i))

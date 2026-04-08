@@ -2,6 +2,7 @@
 #define BOT_AI_H
 
 #include "botcommon.h"
+#include "bot_bg_ai.h"
 
 #include "CreatureAI.h"
 #include "EventProcessor.h"
@@ -190,8 +191,13 @@ public:
     static bool IsWanderNodeAvailableForBotFaction(WanderNode const* wp, uint32 factionTemplateId, bool teleport, bool spawn = false);
     WanderNode const* GetClosestWanderNode() const;
     WanderNode const* GetNextWanderNode(Position const* fromPos, uint8 lvl, bool random) const;
-    WanderNode const* GetNextTravelNode(Position const* from, bool random) const;
+    WanderNode const* GetNextTravelNode(Position const* from, bool random);
     WanderNode const* GetNextBGTravelNode() const;
+    WanderNode const* GetNextBGTravelNodeWithIntelligence();
+    WanderNode const* MakeSuboptimalBGDecision() const;
+    void SelectBGStrategy();
+    uint32 GetBGStrategy() const { return _bgCurrentStrategy; }
+    std::vector<BGMatchSnapshot> const& GetMatchSnapshots() const { return _bgMatchSnapshots; }
     void OnWanderNodeReached();
     void OnBotEnterBattleground();
 
@@ -217,6 +223,21 @@ public:
     void SetBG(Battleground* bg) { _bg = bg; }
 
     static bool CCed(Unit const* target, bool root = false);
+    static bool HasBreakableCC(Unit const* target);
+    bool IsEnemyHealer(Unit const* unit) const;
+    Unit* FindBGPeelTarget() const;
+    bool TryBGKite(Unit* attacker, uint32 diff);
+    Position GetDefenseSpreadPosition(Position const& nodePos) const;
+    void TriggerBGSpeedBoost();
+    void CheckBGObjectiveProximity();
+    std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
+    uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
+    uint16 GetBGMatchKills() const { return _bgMatchKills; }
+    uint16 GetBGMatchDeaths() const { return _bgMatchDeaths; }
+    WanderNode const* ConsultTeamPlan();
+    WanderNode const* ConsultWSGPlan(BGTeamPlan const& plan, Battleground const* bg, BotBGPersonality const& p);
+    uint8 PickBestNodeAssignment(BGTeamPlan const& plan, BotBGPersonality const& p) const;
+    WanderNode const* FindClosestNodeTo(float x, float y) const;
 
     void TeleportHomeStart(bool reset);
     void TeleportHome(bool reset);
@@ -291,6 +312,9 @@ public:
     bool HasRealEquipment() const { return !!GetRealEquippedItemsCount(); }
     float GetAverageItemLevel() const;
     std::pair<float, float> GetBotGearScores() const;
+
+    void UpdatePlayerVisibleItems();
+    static uint8 BotSlotToPlayerSlot(uint8 botSlot);
 
     void CastBotItemCombatSpell(DamageInfo const& damageInfo);
     void CastBotItemCombatSpell(DamageInfo const& damageInfo, Item* item, ItemTemplate const* proto);
@@ -763,6 +787,33 @@ private:
     uint8 _baseLevel{};
     WanderNode const* _travel_node_last{};
     WanderNode const* _travel_node_cur{};
+
+    // BG intelligence system
+    uint32 _bgWaypointRecordTimer{};
+    uint32 _bgCurrentStrategy{6}; // BG_STRATEGY_MAX = unset
+    uint32 _bgReactionDelay{};
+    bool _bgNeedsReassessment{};
+    mutable uint8 _bgAssignedRole{}; // 0=unset, 1=attack, 2=defend
+    mutable uint32 _bgLastScore{}; // track score changes to trigger reassessment
+    mutable uint32 _bgLastFlagState{}; // track flag state changes
+    uint32 _bgEnemyReadTimer{};
+    uint8 _bgDetectedEnemyBehavior{}; // BGEnemyBehavior enum
+    uint32 _bgSnapshotTimer{};
+    std::vector<BGMatchSnapshot> _bgMatchSnapshots;
+    uint32 _bgKiteTimer{};
+    uint32 _bgStrafeTimer{};
+    uint32 _bgStrategyRevisionTimer{};
+    uint16 _bgStratKills{};
+    uint16 _bgStratDeaths{};
+    Position _bgObjectivePos{};
+    bool _bgHasObjective{};
+    uint8 _bgPlanNodeIdx{0xFF};
+    uint32 _bgPlanVersion{};
+    bool _bgAtRally{};
+    std::vector<BGQEpisodeStep> _bgQEpisode;
+    uint16 _bgMatchKills{};
+    uint16 _bgMatchDeaths{};
+    uint32 _bgObjectiveCapsCount{};
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
