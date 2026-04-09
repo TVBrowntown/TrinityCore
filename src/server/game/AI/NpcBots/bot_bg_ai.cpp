@@ -460,6 +460,13 @@ float BotBGAIMgr::GetTeamBurstAvailability(uint32 bgInstanceId, TeamId teamId)
     return 1.0f - float(onCD) / float(total);
 }
 
+void BotBGAIMgr::ClearOffensiveCDs(uint32 bgInstanceId)
+{
+    std::unique_lock lock(_lock);
+    _offensiveCDExpiry.erase(MakeCombatKey(bgInstanceId, TEAM_ALLIANCE));
+    _offensiveCDExpiry.erase(MakeCombatKey(bgInstanceId, TEAM_HORDE));
+}
+
 // --- Intelligence-Gated Interrupt Delay ---
 
 uint32 BotBGAIMgr::ComputeInterruptDelay(float intelligence)

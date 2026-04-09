@@ -1001,6 +1001,7 @@ void Battleground::EndBattleground(uint32 winner)
     BotBGAIMgr::ClearInterruptClaims(GetInstanceID());
     BotBGAIMgr::ClearDRTracking(GetInstanceID());
     BotBGAIMgr::ClearBurstReadiness(GetInstanceID());
+    BotBGAIMgr::ClearOffensiveCDs(GetInstanceID());
     //end npcbot
     for (BattlegroundPlayerMap::iterator itr = m_Players.begin(); itr != m_Players.end(); ++itr)
     {

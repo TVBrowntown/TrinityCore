@@ -539,6 +539,7 @@ public:
     // Cooldown-aware aggression: track team offensive CD availability
     static void RecordOffensiveCDUsed(uint32 bgInstanceId, TeamId teamId, uint32 cooldownDurationMs);
     static float GetTeamBurstAvailability(uint32 bgInstanceId, TeamId teamId); // 0-1, 1 = all CDs ready
+    static void ClearOffensiveCDs(uint32 bgInstanceId);
 
     // Compute intelligence-based interrupt reaction delay (milliseconds)
     static uint32 ComputeInterruptDelay(float intelligence);

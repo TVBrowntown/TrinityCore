@@ -16619,6 +16619,8 @@ void bot_ai::JustDied(Unit* u)
         _bgPlanNodeIdx = 0xFF; // reset plan assignment on death
         _bgAtRally = false;
         _bgHasObjective = false;
+        _bgInterruptDelayTimer = 0;
+        _bgInterruptTargetGuid.Clear();
 
         // Class matchup: they killed me
         if (u)
