@@ -253,6 +253,334 @@ uint32 BotBGAIMgr::SelectStrategy(uint32 mapId, float intelligence)
     return 0;
 }
 
+// --- Utility-Based Action Evaluation ---
+
+BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
+    Creature const* me, Battleground const* bg, BotBGPersonality const& p,
+    uint8 momentum, bool isFC, bool isHealer)
+{
+    if (!me || !bg) return {};
+
+    TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    uint32 myTeamVal = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+    TeamId enemyTeamId = myTeamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+    uint32 bgInstId = bg->GetInstanceID();
+    float myX = me->GetPositionX(), myY = me->GetPositionY();
+
+    // Per-bot deterministic scatter (consistent per bot, prevents stacking on exact positions)
+    uint32 scatter = me->GetEntry() * 2654435761u;
+    float scatterAngle = float(scatter % 628) / 100.0f;
+    float scatterDist = 5.0f + float(scatter % 1000) / 100.0f;
+
+    // Momentum multipliers for attack vs defend preference
+    float attackBias = 0.0f, defendBias = 0.0f;
+    if (momentum >= BG_MOMENTUM_DOMINATING) attackBias = 0.15f;
+    else if (momentum >= BG_MOMENTUM_ADVANTAGE) attackBias = 0.08f;
+    else if (momentum <= BG_MOMENTUM_WIPED) { defendBias = 0.15f; attackBias = -0.1f; }
+    else if (momentum <= BG_MOMENTUM_OUTNUMBERED) { defendBias = 0.08f; attackBias = -0.05f; }
+
+    bool isOpeningRush = bg->GetStartTime() < 210000;
+
+    std::vector<BGUtilityResult> candidates;
+
+    auto addCandidate = [&](BGUtilityAction action, float score, Position pos, uint8 role,
+                            uint8 intent, uint8 node = 0xFF) {
+        if (score <= 0.0f) return;
+        score = std::min(score, 1.0f);
+        // Apply scatter to prevent stacking on exact position
+        pos.m_positionX += scatterDist * std::cos(scatterAngle);
+        pos.m_positionY += scatterDist * std::sin(scatterAngle);
+        candidates.push_back(BGUtilityResult{ action, node, score, pos, role, intent });
+    };
+
+    switch (bg->GetTypeID())
+    {
+        case BATTLEGROUND_WS:
+        {
+            // WSG flag positions
+            static constexpr float FLAG_A_X = 1540.42f, FLAG_A_Y = 1481.33f, FLAG_A_Z = 351.83f;
+            static constexpr float FLAG_H_X = 916.02f, FLAG_H_Y = 1434.41f, FLAG_H_Z = 345.41f;
+            static constexpr float MID_X = 1228.0f, MID_Y = 1458.0f, MID_Z = 340.0f;
+
+            float myFlagX = myTeamId == TEAM_ALLIANCE ? FLAG_A_X : FLAG_H_X;
+            float myFlagY = myTeamId == TEAM_ALLIANCE ? FLAG_A_Y : FLAG_H_Y;
+            float myFlagZ = myTeamId == TEAM_ALLIANCE ? FLAG_A_Z : FLAG_H_Z;
+            float enemyFlagX = myTeamId == TEAM_ALLIANCE ? FLAG_H_X : FLAG_A_X;
+            float enemyFlagY = myTeamId == TEAM_ALLIANCE ? FLAG_H_Y : FLAG_A_Y;
+            float enemyFlagZ = myTeamId == TEAM_ALLIANCE ? FLAG_H_Z : FLAG_A_Z;
+
+            ObjectGuid enemyFCGuid = bg->GetFlagPickerGUID(myTeamId); // enemy carrying OUR flag
+            ObjectGuid friendlyFCGuid = bg->GetFlagPickerGUID(enemyTeamId); // our bot carrying THEIR flag
+            bool enemyHasOurFlag = !enemyFCGuid.IsEmpty();
+            bool weHaveTheirFlag = !friendlyFCGuid.IsEmpty();
+
+            // --- DELIVER FLAG (FC only — always top priority) ---
+            if (isFC)
+            {
+                addCandidate(BG_UTIL_DELIVER_FLAG, 1.0f,
+                    Position(myFlagX, myFlagY, myFlagZ), 1, INTENT_ATTACK_FLAG);
+                break; // FC does nothing else
+            }
+
+            // --- GRAB ENEMY FLAG ---
+            if (!weHaveTheirFlag) // flag is at base or on ground
+            {
+                float dist = std::sqrt((enemyFlagX-myX)*(enemyFlagX-myX) + (enemyFlagY-myY)*(enemyFlagY-myY));
+                float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
+                float score = (0.75f + attackBias + p.aggression * 0.15f + p.objectiveFocus * 0.1f)
+                    * distFactor - stacking;
+                if (isOpeningRush) score += 0.1f;
+                addCandidate(BG_UTIL_GRAB_ENEMY_FLAG, score,
+                    Position(enemyFlagX, enemyFlagY, enemyFlagZ), 1, INTENT_ATTACK_FLAG);
+            }
+
+            // --- CHASE ENEMY FC (immediate — enemy has our flag) ---
+            if (enemyHasOurFlag)
+            {
+                Position fcPos(enemyFlagX, enemyFlagY, enemyFlagZ); // fallback
+                Unit* enemyFC = ObjectAccessor::GetUnit(*me, enemyFCGuid);
+                if (enemyFC && enemyFC->IsAlive())
+                    fcPos.Relocate(enemyFC->GetPositionX(), enemyFC->GetPositionY(), enemyFC->GetPositionZ());
+
+                float dist = me->GetExactDist2d(fcPos);
+                float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
+                float score = (0.85f + p.aggression * 0.1f) * distFactor - stacking;
+                addCandidate(BG_UTIL_CHASE_ENEMY_FC, score, fcPos, 1, INTENT_CHASE_FC);
+            }
+
+            // --- ESCORT FRIENDLY FC ---
+            if (weHaveTheirFlag)
+            {
+                Unit* friendlyFC = ObjectAccessor::GetUnit(*me, friendlyFCGuid);
+                Position fcPos(myFlagX, myFlagY, myFlagZ);
+                if (friendlyFC && friendlyFC->IsAlive())
+                    fcPos.Relocate(friendlyFC->GetPositionX(), friendlyFC->GetPositionY(), friendlyFC->GetPositionZ());
+
+                float dist = me->GetExactDist2d(fcPos);
+                float distFactor = std::max(0.0f, 1.0f - dist / 400.0f);
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
+                float score = (0.55f + p.groupTendency * 0.15f + p.caution * 0.1f) * distFactor - stacking;
+                // More escorts needed if enemy has our flag too (both flags out)
+                if (enemyHasOurFlag) score += 0.1f;
+                addCandidate(BG_UTIL_ESCORT_FRIENDLY_FC, score, fcPos, 1, INTENT_ESCORT_FC);
+            }
+
+            // --- DEFEND OWN FLAG (only if flag is actually at base) ---
+            if (!enemyHasOurFlag)
+            {
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_FLAG) * 0.15f;
+                float score = 0.45f + defendBias + p.caution * 0.2f + p.objectiveFocus * 0.1f - stacking;
+                // If we have their flag, defending ours is more important (need both for cap)
+                if (weHaveTheirFlag) score += 0.25f;
+                addCandidate(BG_UTIL_DEFEND_OWN_FLAG, score,
+                    Position(myFlagX, myFlagY, myFlagZ), 2, INTENT_DEFEND_FLAG);
+            }
+
+            // --- FIGHT MIDFIELD (always available, low priority) ---
+            {
+                float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f;
+                if (isOpeningRush) score += 0.15f;
+                addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
+                    Position(MID_X, MID_Y, MID_Z), 1, INTENT_ROAM);
+            }
+            break;
+        }
+        case BATTLEGROUND_AB:
+        {
+            BattlegroundAB const* ab = dynamic_cast<BattlegroundAB const*>(bg);
+            if (!ab) break;
+
+            // Count how many nodes we hold
+            uint8 nodesHeld = 0;
+            for (uint8 n = 0; n < BG_AB_DYNAMIC_NODES_COUNT; ++n)
+                if (ab->IsNodeOccupied(n, myTeamId)) ++nodesHeld;
+
+            // Strategic need: we need at least 3 nodes to win
+            float strategicNeed = (nodesHeld < 3) ? 0.2f : 0.0f;
+
+            for (uint8 n = 0; n < BG_AB_DYNAMIC_NODES_COUNT; ++n)
+            {
+                float nodeX = BG_AB_NodePositions[n].GetPositionX();
+                float nodeY = BG_AB_NodePositions[n].GetPositionY();
+                float nodeZ = BG_AB_NodePositions[n].GetPositionZ();
+                float dist = std::sqrt((nodeX-myX)*(nodeX-myX) + (nodeY-myY)*(nodeY-myY));
+                float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+
+                bool ours = ab->IsNodeOccupied(n, myTeamId);
+                bool theirs = ab->IsNodeOccupied(n, enemyTeamId);
+                bool contested = ab->IsNodeContested(n, myTeamId) || ab->IsNodeContested(n, enemyTeamId);
+
+                if (!ours)
+                {
+                    // ATTACK NODE
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, n) * 0.12f;
+                    float base = theirs ? 0.6f : 0.7f; // neutral > enemy (easier to cap)
+                    float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
+                        * distFactor - stacking;
+                    if (isOpeningRush) score += 0.1f;
+                    addCandidate(BG_UTIL_ATTACK_NODE, score,
+                        Position(nodeX, nodeY, nodeZ), 1, INTENT_ATTACK_NODE, n);
+                }
+
+                if (ours)
+                {
+                    // DEFEND NODE
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, n) * 0.15f;
+                    float base = 0.4f;
+                    float score = (base + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    // If barely holding 3, defense is more important
+                    if (nodesHeld <= 3) score += 0.12f;
+                    addCandidate(BG_UTIL_DEFEND_NODE, score,
+                        Position(nodeX, nodeY, nodeZ), 2, INTENT_DEFEND_NODE, n);
+                }
+
+                if (contested)
+                {
+                    // REINFORCE contested node (immediate need)
+                    uint8 alliesNear = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, n)
+                        + CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, n);
+                    if (alliesNear < 4) // don't over-stack
+                    {
+                        float score = (0.8f + p.aggression * 0.1f + p.groupTendency * 0.1f) * distFactor;
+                        addCandidate(BG_UTIL_REINFORCE_NODE, score,
+                            Position(nodeX, nodeY, nodeZ), 1, INTENT_ATTACK_NODE, n);
+                    }
+                }
+            }
+
+            // FIGHT MIDFIELD (roaming)
+            {
+                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f;
+                addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
+                    Position(1185.0f, 1184.0f, -56.0f), 1, INTENT_ROAM); // AB center
+            }
+            break;
+        }
+        case BATTLEGROUND_EY:
+        {
+            BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+            if (!ey) break;
+
+            uint8 pointsHeld = 0;
+            for (uint8 pt = 0; pt < EY_POINTS_MAX; ++pt)
+                if (ey->GetPointOwner(pt) == myTeamId) ++pointsHeld;
+
+            float strategicNeed = (pointsHeld < 2) ? 0.2f : 0.0f;
+
+            // EY Flag handling
+            ObjectGuid eyFCGuid = ey->GetFlagPickerGUID();
+            bool flagPickedUp = !eyFCGuid.IsEmpty();
+
+            if (isFC)
+            {
+                // Deliver flag to nearest owned point
+                float bestDist = 9999.0f;
+                uint8 bestPoint = 0xFF;
+                for (uint8 pt = 0; pt < EY_POINTS_MAX; ++pt)
+                {
+                    if (ey->GetPointOwner(pt) != myTeamId) continue;
+                    float dist = me->GetExactDist2d(BG_EY_TriggerPositions[pt]);
+                    if (dist < bestDist) { bestDist = dist; bestPoint = pt; }
+                }
+                if (bestPoint < EY_POINTS_MAX)
+                {
+                    addCandidate(BG_UTIL_DELIVER_NEUTRAL_FLAG, 1.0f,
+                        Position(BG_EY_TriggerPositions[bestPoint].GetPositionX(),
+                            BG_EY_TriggerPositions[bestPoint].GetPositionY(),
+                            BG_EY_TriggerPositions[bestPoint].GetPositionZ()),
+                        1, INTENT_ATTACK_FLAG, bestPoint);
+                }
+                // No owned points: FC should help capture one instead of breaking
+                // Fall through to point evaluation below
+                if (bestPoint < EY_POINTS_MAX) break;
+            }
+
+            // Grab Netherstorm flag if not picked up
+            if (!flagPickedUp)
+            {
+                static constexpr float EY_FLAG_X = 2174.78f, EY_FLAG_Y = 1569.0f, EY_FLAG_Z = 1160.0f;
+                float dist = std::sqrt((EY_FLAG_X-myX)*(EY_FLAG_X-myX) + (EY_FLAG_Y-myY)*(EY_FLAG_Y-myY));
+                float distFactor = std::max(0.0f, 1.0f - dist / 500.0f);
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
+                float score = (0.65f + p.objectiveFocus * 0.15f) * distFactor - stacking;
+                if (pointsHeld > 0) score += 0.1f; // flag is worth more if we have points to cap at
+                if (pointsHeld == 0) score -= 0.25f; // useless without owned points to deliver to
+                addCandidate(BG_UTIL_GRAB_NEUTRAL_FLAG, score,
+                    Position(EY_FLAG_X, EY_FLAG_Y, EY_FLAG_Z), 1, INTENT_ATTACK_FLAG);
+            }
+
+            // Escort friendly FC
+            if (flagPickedUp)
+            {
+                Unit* fc = ObjectAccessor::GetUnit(*me, eyFCGuid);
+                if (fc && fc->IsAlive() && bg->GetBotTeamId(fc->GetGUID()) == myTeamId)
+                {
+                    float dist = me->GetExactDist2d(fc);
+                    float distFactor = std::max(0.0f, 1.0f - dist / 400.0f);
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
+                    float score = (0.5f + p.groupTendency * 0.15f) * distFactor - stacking;
+                    addCandidate(BG_UTIL_ESCORT_FRIENDLY_FC, score,
+                        Position(fc->GetPositionX(), fc->GetPositionY(), fc->GetPositionZ()),
+                        1, INTENT_ESCORT_FC);
+                }
+            }
+
+            // Point control (same pattern as AB)
+            for (uint8 pt = 0; pt < EY_POINTS_MAX; ++pt)
+            {
+                float ptX = BG_EY_TriggerPositions[pt].GetPositionX();
+                float ptY = BG_EY_TriggerPositions[pt].GetPositionY();
+                float ptZ = BG_EY_TriggerPositions[pt].GetPositionZ();
+                float dist = std::sqrt((ptX-myX)*(ptX-myX) + (ptY-myY)*(ptY-myY));
+                float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+
+                TeamId owner = ey->GetPointOwner(pt);
+                bool ours = (owner == myTeamId);
+
+                if (!ours)
+                {
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, pt) * 0.12f;
+                    float base = (owner == TEAM_NEUTRAL) ? 0.65f : 0.55f;
+                    float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
+                        * distFactor - stacking;
+                    addCandidate(BG_UTIL_ATTACK_NODE, score,
+                        Position(ptX, ptY, ptZ), 1, INTENT_ATTACK_NODE, pt);
+                }
+                else
+                {
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, pt) * 0.15f;
+                    float score = (0.4f + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    if (pointsHeld <= 2) score += 0.12f;
+                    addCandidate(BG_UTIL_DEFEND_NODE, score,
+                        Position(ptX, ptY, ptZ), 2, INTENT_DEFEND_NODE, pt);
+                }
+            }
+
+            // Fight midfield
+            {
+                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f;
+                addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
+                    Position(2174.0f, 1569.0f, 1160.0f), 1, INTENT_ROAM);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    if (candidates.empty())
+        return {};
+
+    // Pick highest-scoring action
+    BGUtilityResult best = candidates[0];
+    for (auto const& c : candidates)
+        if (c.score > best.score) best = c;
+
+    return best;
+}
+
 // --- DB Load/Save ---
 
 void BotBGAIMgr::LoadFromDB()

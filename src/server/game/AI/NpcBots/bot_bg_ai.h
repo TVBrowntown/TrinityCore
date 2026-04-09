@@ -224,10 +224,38 @@ struct BGTeamPlan
 struct BGEnemySighting { float posX, posY; uint32 lastSeenTime; uint8 enemyClass; };
 
 enum BGIntentType : uint8 { INTENT_ATTACK_FLAG=0, INTENT_DEFEND_FLAG=1, INTENT_ESCORT_FC=2,
-    INTENT_ATTACK_NODE=3, INTENT_DEFEND_NODE=4, INTENT_ROAM=5, INTENT_MAX=6 };
+    INTENT_ATTACK_NODE=3, INTENT_DEFEND_NODE=4, INTENT_ROAM=5, INTENT_CHASE_FC=6, INTENT_MAX=7 };
 struct BGBotIntention { uint8 intentType; uint8 targetNodeIdx; uint32 timestamp; };
 struct BGTeamCooldown { uint32 expiryTime; uint8 cooldownType; };
 struct BGPatrolPoint { float x, y; float engagementScore; };
+
+// Utility-based action evaluation — bots choose between immediate needs and long-term goals
+enum BGUtilityAction : uint8 {
+    // WSG actions
+    BG_UTIL_GRAB_ENEMY_FLAG = 0,
+    BG_UTIL_DELIVER_FLAG,
+    BG_UTIL_CHASE_ENEMY_FC,
+    BG_UTIL_ESCORT_FRIENDLY_FC,
+    BG_UTIL_DEFEND_OWN_FLAG,
+    BG_UTIL_FIGHT_MIDFIELD,
+    // AB/EY node actions (targetNode specifies which)
+    BG_UTIL_ATTACK_NODE,
+    BG_UTIL_DEFEND_NODE,
+    BG_UTIL_REINFORCE_NODE,
+    // EY flag
+    BG_UTIL_GRAB_NEUTRAL_FLAG,
+    BG_UTIL_DELIVER_NEUTRAL_FLAG,
+    BG_UTIL_MAX
+};
+
+struct BGUtilityResult {
+    BGUtilityAction action{BG_UTIL_FIGHT_MIDFIELD};
+    uint8 targetNode{0xFF};
+    float score{0.0f};
+    Position targetPos{};
+    uint8 role{1};          // 1=attack, 2=defend
+    uint8 intentType{INTENT_ROAM};
+};
 
 class BotBGAIMgr
 {
@@ -243,6 +271,11 @@ public:
     // Intelligence checks
     static bool IntelligenceCheck(float intelligence);
     static uint32 ComputeReactionDelay(float intelligence);
+
+    // Utility-based action evaluation: scores all possible actions, returns the best one
+    static BGUtilityResult EvaluateUtilityActions(
+        Creature const* me, Battleground const* bg, BotBGPersonality const& personality,
+        uint8 momentum, bool isFC, bool isHealer);
 
     // Waypoint mesh
     static void RecordWaypointVisit(uint32 mapId, float x, float y, float z);

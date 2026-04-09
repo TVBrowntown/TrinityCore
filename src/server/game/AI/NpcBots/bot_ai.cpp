@@ -21788,7 +21788,8 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
     if (!me->GetMap()->IsBattleground() || !GetBG())
         return nullptr;
 
-    // This function sets _bgObjectivePos/_bgHasObjective based on strategic decisions
+    // This function uses utility-based evaluation to pick the best action
+    // Scores all possible actions and picks the highest — balances immediate needs vs long-term goals
     // Returns nullptr — PF system handles actual movement
 
     Battleground* bg = GetBG();
@@ -21807,29 +21808,6 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
     TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
     uint32 myTeamVal = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
 
-    // Per-bot deterministic scatter
-    uint32 scatter = me->GetEntry() * 2654435761u;
-    float scatterAngle = float(scatter % 628) / 100.0f;
-    float scatterDist = 5.0f + float(scatter % 1000) / 100.0f;
-
-    // Count alive allies for role ratios
-    uint8 teamSize = 0;
-    uint8 curAttackers = 0, curDefenders = 0;
-    for (auto const& [guid, botData] : bg->GetBots())
-    {
-        if (botData.Team != myTeamVal) continue;
-        Creature const* ally = ObjectAccessor::GetCreature(*me, guid);
-        if (!ally || !ally->IsAlive()) continue;
-        ++teamSize;
-        if (ally != me && ally->GetBotAI())
-        {
-            uint8 allyRole = ally->GetBotAI()->_bgAssignedRole;
-            if (allyRole == 1) ++curAttackers;
-            else if (allyRole == 2) ++curDefenders;
-        }
-    }
-    if (teamSize == 0) teamSize = 1;
-
     // Compute momentum
     uint8 momentum = BG_MOMENTUM_EVEN;
     {
@@ -21846,189 +21824,18 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
         else if (aliveEnemies > 0 && aliveAllies * 2 <= aliveEnemies) momentum = BG_MOMENTUM_OUTNUMBERED;
     }
 
-    switch (bg->GetTypeID())
+    bool botIsFC = IsFlagCarrier(me);
+    bool botIsHealer = HasRole(BOT_ROLE_HEAL);
+
+    BGUtilityResult best = BotBGAIMgr::EvaluateUtilityActions(me, bg, personality, momentum, botIsFC, botIsHealer);
+
+    if (best.score > 0.0f)
     {
-        case BATTLEGROUND_WS:
-        {
-            static constexpr float ALLY_FLAG_X_A = 1540.42f, ALLY_FLAG_Y_A = 1481.33f, ALLY_FLAG_Z_A = 351.83f;
-            static constexpr float ALLY_FLAG_X_H = 916.02f, ALLY_FLAG_Y_H = 1434.41f, ALLY_FLAG_Z_H = 345.41f;
-
-            float myFlagX = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_X_A : ALLY_FLAG_X_H;
-            float myFlagY = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_Y_A : ALLY_FLAG_Y_H;
-            float myFlagZ = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_Z_A : ALLY_FLAG_Z_H;
-            float enemyFlagX = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_X_H : ALLY_FLAG_X_A;
-            float enemyFlagY = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_Y_H : ALLY_FLAG_Y_A;
-            float enemyFlagZ = myTeamId == TEAM_ALLIANCE ? ALLY_FLAG_Z_H : ALLY_FLAG_Z_A;
-
-            // FC: deliver flag
-            if (IsFlagCarrier(me))
-            {
-                _bgAssignedRole = 1;
-                _bgObjectivePos.Relocate(myFlagX, myFlagY, myFlagZ);
-                BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_ESCORT_FC);
-                _bgHasObjective = true;
-                break;
-            }
-
-            // Flag status awareness
-            TeamId enemyTeamId = myTeamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
-            ObjectGuid enemyFCGuid = bg->GetFlagPickerGUID(myTeamId); // enemy carrying OUR flag
-            bool enemyHasOurFlag = !enemyFCGuid.IsEmpty();
-            bool weHaveTheirFlag = !bg->GetFlagPickerGUID(enemyTeamId).IsEmpty();
-
-            // Count attackers who have died recently without capping (failed attempts)
-            // Use intention counts as proxy: many attackers broadcasting but flag not grabbed
-            uint8 curFlagAttackers = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_ATTACK_FLAG);
-
-            // Role assignment: attack ratio based on momentum
-            float attackRatio = 0.70f;
-            if (isOpeningRush || momentum >= BG_MOMENTUM_DOMINATING) attackRatio = 0.90f;
-            else if (momentum >= BG_MOMENTUM_ADVANTAGE) attackRatio = 0.80f;
-            else if (momentum <= BG_MOMENTUM_WIPED) attackRatio = 0.30f;
-            else if (momentum <= BG_MOMENTUM_OUTNUMBERED) attackRatio = 0.50f;
-
-            // If enemy has our flag, no point defending empty base — everyone attacks/chases
-            if (enemyHasOurFlag)
-                attackRatio = 1.0f;
-
-            // If we already have their flag, more defenders to protect FC return
-            if (weHaveTheirFlag && !enemyHasOurFlag)
-                attackRatio = std::min(attackRatio, 0.40f);
-
-            // If attackers keep failing (many attackers but flag not grabbed), send reinforcements
-            if (!weHaveTheirFlag && curFlagAttackers >= 2 && curFlagAttackers < teamSize)
-                attackRatio = std::max(attackRatio, float(curFlagAttackers + 2) / float(teamSize));
-
-            uint8 desiredAttackers = uint8(teamSize * attackRatio);
-            uint8 desiredDefenders = teamSize - desiredAttackers;
-
-            // Assign role based on what's understaffed
-            if (desiredDefenders > 0 && curDefenders < desiredDefenders && personality.caution > 0.4f)
-            {
-                _bgAssignedRole = 2; // defend
-                _bgObjectivePos.Relocate(myFlagX + scatterDist * std::cos(scatterAngle),
-                    myFlagY + scatterDist * std::sin(scatterAngle), myFlagZ);
-                BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_DEFEND_FLAG);
-            }
-            else if (enemyHasOurFlag)
-            {
-                // Chase the enemy FC instead of going to empty base
-                _bgAssignedRole = 1;
-                // Try to find enemy FC position
-                Unit* enemyFC = ObjectAccessor::GetUnit(*me, enemyFCGuid);
-                if (enemyFC && enemyFC->IsAlive())
-                    _bgObjectivePos.Relocate(enemyFC->GetPositionX() + scatterDist * std::cos(scatterAngle),
-                        enemyFC->GetPositionY() + scatterDist * std::sin(scatterAngle), enemyFC->GetPositionZ());
-                else
-                    _bgObjectivePos.Relocate(enemyFlagX + scatterDist * std::cos(scatterAngle),
-                        enemyFlagY + scatterDist * std::sin(scatterAngle), enemyFlagZ); // head to enemy base to intercept
-                BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_ATTACK_FLAG);
-            }
-            else
-            {
-                _bgAssignedRole = 1; // attack
-                _bgObjectivePos.Relocate(enemyFlagX + scatterDist * std::cos(scatterAngle),
-                    enemyFlagY + scatterDist * std::sin(scatterAngle), enemyFlagZ);
-                BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_ATTACK_FLAG);
-            }
-            _bgHasObjective = true;
-            break;
-        }
-        case BATTLEGROUND_AB:
-        {
-            BattlegroundAB const* ab = dynamic_cast<BattlegroundAB const*>(bg);
-            if (!ab) break;
-
-            TeamId enemyTeamId = myTeamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
-
-            // Score each node: prefer unowned, close, not already full of allies
-            float bestScore = -999.0f;
-            uint8 bestNode = 0;
-            for (uint8 n = 0; n < BG_AB_DYNAMIC_NODES_COUNT; ++n)
-            {
-                float score = 0.0f;
-                float dist = me->GetExactDist2d(BG_AB_NodePositions[n]);
-                score += std::max(0.0f, 500.0f - dist) / 500.0f; // closer = better
-
-                if (ab->IsNodeOccupied(n, myTeamId))
-                    score -= 1.0f; // already ours, less priority
-                else if (ab->IsNodeOccupied(n, enemyTeamId))
-                    score += 2.0f; // enemy holds it, attack
-                else
-                    score += 3.0f; // neutral, high priority
-
-                // Check how many allies intend this node
-                uint8 allyCount = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_ATTACK_NODE, n)
-                    + BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_DEFEND_NODE, n);
-                score -= allyCount * 0.5f; // avoid stacking
-
-                // Personality: aggressive bots prefer unowned, cautious prefer owned
-                if (!ab->IsNodeOccupied(n, myTeamId))
-                    score += personality.aggression * 1.0f;
-                else
-                    score += personality.caution * 0.5f;
-
-                if (score > bestScore) { bestScore = score; bestNode = n; }
-            }
-
-            _bgAssignedRole = ab->IsNodeOccupied(bestNode, myTeamId) ? 2 : 1;
-            uint8 intentType = _bgAssignedRole == 1 ? INTENT_ATTACK_NODE : INTENT_DEFEND_NODE;
-            BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), intentType, bestNode);
-
-            _bgObjectivePos.Relocate(
-                BG_AB_NodePositions[bestNode].GetPositionX() + scatterDist * std::cos(scatterAngle),
-                BG_AB_NodePositions[bestNode].GetPositionY() + scatterDist * std::sin(scatterAngle),
-                BG_AB_NodePositions[bestNode].GetPositionZ());
-            _bgHasObjective = true;
-            break;
-        }
-        case BATTLEGROUND_EY:
-        {
-            BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
-            if (!ey) break;
-
-            // Same scoring as AB but for 4 points
-            float bestScore = -999.0f;
-            uint8 bestPoint = 0;
-            for (uint8 p = 0; p < EY_POINTS_MAX; ++p)
-            {
-                float score = 0.0f;
-                float dist = me->GetExactDist2d(BG_EY_TriggerPositions[p]);
-                score += std::max(0.0f, 500.0f - dist) / 500.0f;
-
-                TeamId owner = ey->GetPointOwner(p);
-                if (owner == myTeamId)
-                    score -= 1.0f;
-                else if (owner == TEAM_NEUTRAL)
-                    score += 3.0f;
-                else
-                    score += 2.0f;
-
-                uint8 allyCount = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_ATTACK_NODE, p)
-                    + BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_DEFEND_NODE, p);
-                score -= allyCount * 0.5f;
-
-                if (!owner || owner != myTeamId)
-                    score += personality.aggression * 1.0f;
-                else
-                    score += personality.caution * 0.5f;
-
-                if (score > bestScore) { bestScore = score; bestPoint = p; }
-            }
-
-            _bgAssignedRole = (ey->GetPointOwner(bestPoint) == myTeamId) ? 2 : 1;
-            uint8 intentType = _bgAssignedRole == 1 ? INTENT_ATTACK_NODE : INTENT_DEFEND_NODE;
-            BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), intentType, bestPoint);
-
-            _bgObjectivePos.Relocate(
-                BG_EY_TriggerPositions[bestPoint].GetPositionX() + scatterDist * std::cos(scatterAngle),
-                BG_EY_TriggerPositions[bestPoint].GetPositionY() + scatterDist * std::sin(scatterAngle),
-                BG_EY_TriggerPositions[bestPoint].GetPositionZ());
-            _bgHasObjective = true;
-            break;
-        }
-        default:
-            break;
+        _bgAssignedRole = best.role;
+        _bgObjectivePos.Relocate(best.targetPos);
+        _bgHasObjective = true;
+        BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(),
+            best.intentType, best.targetNode);
     }
 
     return nullptr;
