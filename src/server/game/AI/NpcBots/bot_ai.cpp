@@ -19418,20 +19418,11 @@ void bot_ai::Evade()
     {
         _evadeMode = true;
 
-        // BG bots: recalculate movement while still moving for fluid motion
-        // Issue new movement command when within 5 yards of current destination
-        bool bgShouldRecalc = false;
-        if (me->GetMap()->IsBattlegroundOrArena() && me->isMoving() && !me->IsInCombat())
+        if (!me->isMoving())
         {
-            bgShouldRecalc = (dist < 8.0f);
-        }
+            ++_evadeCount;
 
-        if (!me->isMoving() || bgShouldRecalc)
-        {
-            if (!me->isMoving())
-                ++_evadeCount;
-
-            if (dist > (me->GetMap()->GetEntry()->IsContinent() ? 15.0f : INTERACTION_DISTANCE) || bgShouldRecalc)
+            if (dist > (me->GetMap()->GetEntry()->IsContinent() ? 15.0f : INTERACTION_DISTANCE))
             {
                 // BG bots: skip WanderNode jump/pathing flags, use PF system directly
                 if (!me->GetMap()->IsBattlegroundOrArena() &&
@@ -19568,8 +19559,8 @@ void bot_ai::Evade()
                             blendedDirY = navCtx.finalDirY;
                         }
 
-                        // Step distance: short enough for smooth recalculation, long enough for natural movement
-                        float moveDist = frand(15.0f, 25.0f);
+                        // Step distance: long enough for smooth movement, short enough for course corrections
+                        float moveDist = frand(25.0f, 40.0f);
                         pos.Relocate(
                             me->GetPositionX() + blendedDirX * moveDist,
                             me->GetPositionY() + blendedDirY * moveDist,
