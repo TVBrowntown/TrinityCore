@@ -815,11 +815,22 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 if (!ours)
                 {
                     // ATTACK NODE
-                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, n) * 0.12f;
+                    uint8 alliesHeading = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, n);
+                    float stacking = alliesHeading * 0.12f;
                     float base = theirs ? 0.6f : 0.7f; // neutral > enemy (easier to cap)
                     float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
                         * distFactor - stacking;
                     if (isOpeningRush) score += 0.1f;
+                    // Coordinated engage: smart bots prefer nodes where allies are also heading
+                    // Penalize going alone against enemy-held nodes (need backup)
+                    if (theirs && p.intelligence >= 0.5f && !isOpeningRush)
+                    {
+                        uint8 enemiesAtNode = GetEnemyConcentration(bgInstId, myTeamId, nodeX, nodeY, 35.0f, 10000);
+                        if (alliesHeading == 0 && enemiesAtNode >= 2)
+                            score *= 0.5f; // don't go alone against 2+ defenders
+                        else if (alliesHeading >= 1)
+                            score += 0.1f; // bonus for coordinated attack
+                    }
                     addCandidate(BG_UTIL_ATTACK_NODE, score,
                         Position(nodeX, nodeY, nodeZ), 1, INTENT_ATTACK_NODE, n);
                 }
@@ -832,6 +843,13 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     float score = (base + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
                     // If barely holding 3, defense is more important
                     if (nodesHeld <= 3) score += 0.12f;
+                    // Enemy concentration detection: boost defense if enemies pushing this node
+                    if (p.intelligence >= 0.5f)
+                    {
+                        uint8 enemyPressure = GetEnemyConcentration(bgInstId, myTeamId, nodeX, nodeY, 50.0f, 15000);
+                        if (enemyPressure >= 2) score += 0.15f; // enemies grouping up here
+                        if (enemyPressure >= 4) score += 0.15f; // major push incoming
+                    }
                     addCandidate(BG_UTIL_DEFEND_NODE, score,
                         Position(nodeX, nodeY, nodeZ), 2, INTENT_DEFEND_NODE, n);
                 }
@@ -982,10 +1000,20 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
                 if (!ours)
                 {
-                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, pt) * 0.12f;
+                    uint8 alliesHeading = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, pt);
+                    float stacking = alliesHeading * 0.12f;
                     float base = (owner == TEAM_NEUTRAL) ? 0.65f : 0.55f;
                     float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
                         * distFactor - stacking;
+                    // Coordinated engage: don't attack enemy-held point alone
+                    if (owner != TEAM_NEUTRAL && p.intelligence >= 0.5f)
+                    {
+                        uint8 enemiesAtPt = GetEnemyConcentration(bgInstId, myTeamId, ptX, ptY, 35.0f, 10000);
+                        if (alliesHeading == 0 && enemiesAtPt >= 2)
+                            score *= 0.5f;
+                        else if (alliesHeading >= 1)
+                            score += 0.1f;
+                    }
                     addCandidate(BG_UTIL_ATTACK_NODE, score,
                         Position(ptX, ptY, ptZ), 1, INTENT_ATTACK_NODE, pt);
                 }
@@ -994,6 +1022,13 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, pt) * 0.15f;
                     float score = (0.4f + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
                     if (pointsHeld <= 2) score += 0.12f;
+                    // Enemy concentration: boost defense if enemies pushing this point
+                    if (p.intelligence >= 0.5f)
+                    {
+                        uint8 enemyPressure = GetEnemyConcentration(bgInstId, myTeamId, ptX, ptY, 50.0f, 15000);
+                        if (enemyPressure >= 2) score += 0.15f;
+                        if (enemyPressure >= 4) score += 0.15f;
+                    }
                     addCandidate(BG_UTIL_DEFEND_NODE, score,
                         Position(ptX, ptY, ptZ), 2, INTENT_DEFEND_NODE, pt);
                 }

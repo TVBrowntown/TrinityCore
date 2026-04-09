@@ -981,6 +981,28 @@ void Battleground::EndBattleground(uint32 winner)
         reward -= float(bot->GetBotAI()->GetBGMatchDeaths()) * 0.15f;
         reward += float(bot->GetBotAI()->GetBGObjectiveCaps()) * 0.3f;
         reward += float(scoreDiff) * 0.01f;
+
+        // Role-specific reward components (use universally available stats)
+        auto scoreIt = BotScores.find(guid);
+        if (scoreIt != BotScores.end())
+        {
+            bool isHealer = bot->GetBotAI()->HasRole(BOT_ROLE_HEAL);
+            if (isHealer)
+            {
+                // Healers: reward for healing done (normalized, ~50k healing = +0.5)
+                uint32 healDone = scoreIt->second->GetHealingDone();
+                reward += std::min(float(healDone) * 0.00001f, 0.5f);
+                // Healers shouldn't be penalized as heavily for low kills
+                reward += float(bot->GetBotAI()->GetBGMatchDeaths()) * 0.05f; // partially offset death penalty
+            }
+            else
+            {
+                // DPS: reward for killing blows (more impactful than assists)
+                uint32 kbs = scoreIt->second->GetKillingBlows();
+                reward += float(kbs) * 0.12f;
+            }
+        }
+
         reward = std::clamp(reward, -2.0f, 3.0f);
 
         BotBGAIMgr::UpdateQValues(bot->GetBotAI()->GetQEpisode(), reward);
