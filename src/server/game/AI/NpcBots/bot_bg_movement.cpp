@@ -521,6 +521,8 @@ void bot_ai::OnBotEnterBattleground()
     _bgStrafeTimer = 0;
     _bgInterruptDelayTimer = 0;
     _bgInterruptTargetGuid.Clear();
+    _bgFakeCastCooldown = 0;
+    _bgFakeCastPending = false;
     _bgStrategyRevisionTimer = 60000;
     _bgStratKills = 0;
     _bgStratDeaths = 0;

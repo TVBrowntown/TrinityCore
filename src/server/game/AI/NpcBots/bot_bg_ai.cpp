@@ -1,4 +1,5 @@
 #include "bot_bg_ai.h"
+#include "bot_ai.h"
 #include "Battleground.h"
 #include "BattlegroundAB.h"
 #include "BattlegroundEY.h"
@@ -478,6 +479,79 @@ uint32 BotBGAIMgr::ComputeInterruptDelay(float intelligence)
     if (intelligence < 0.7f) return urand(800, 1200);
     if (intelligence < 0.85f) return urand(300, 800);
     return urand(150, 400); // top tier: near-instant
+}
+
+// --- BG Heal Triage ---
+
+float BotBGAIMgr::ComputeHealPriority(Unit const* healer, Unit const* target, Battleground const* bg,
+    TeamId healerTeamId, float intelligence)
+{
+    if (!healer || !target || !bg || !target->IsAlive())
+        return 0.0f;
+
+    float hpPct = float(target->GetHealth()) / float(std::max(target->GetMaxHealth(), 1u)) * 100.0f;
+
+    // Dumb healers: priority = pure health deficit (lowest HP wins)
+    if (intelligence < 0.3f)
+        return 100.0f - hpPct;
+
+    // Role weight: FC > healer > DPS
+    float roleWeight = 1.0f;
+    bool targetIsFC = false;
+    bool targetIsHealer = false;
+
+    if (target->IsNPCBot())
+    {
+        bot_ai const* targetAI = target->ToCreature()->GetBotAI();
+        if (targetAI)
+        {
+            targetIsHealer = targetAI->HasRole(BOT_ROLE_HEAL);
+            // Check if this bot is carrying a flag
+            if (bg->GetTypeID() == BATTLEGROUND_WS)
+            {
+                ObjectGuid fcGuid = bg->GetFlagPickerGUID(bg->GetOtherTeamId(healerTeamId));
+                if (fcGuid == target->GetGUID()) targetIsFC = true;
+            }
+            else if (bg->GetTypeID() == BATTLEGROUND_EY)
+            {
+                BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+                if (ey && ey->GetFlagPickerGUID() == target->GetGUID()) targetIsFC = true;
+            }
+        }
+    }
+
+    if (targetIsFC) roleWeight = 3.0f;
+    else if (targetIsHealer) roleWeight = 2.0f;
+
+    // Health deficit score (0 = full, 100 = dead)
+    float deficit = 100.0f - hpPct;
+
+    // Incoming damage factor: target in combat with multiple attackers = higher priority
+    float incomingFactor = 1.0f;
+    if (intelligence >= 0.5f && target->IsInCombat())
+    {
+        uint8 attackerCount = 0;
+        for (auto const& [_, ref] : target->GetThreatManager().GetThreatenedByMeList())
+            (void)ref, ++attackerCount;
+        // Simple proxy: count attackers targeting this unit
+        if (target->GetVictim())
+        {
+            for (auto const& attacker : target->getAttackers())
+                if (attacker && attacker->IsAlive()) ++attackerCount;
+        }
+        incomingFactor = 1.0f + float(attackerCount) * 0.15f;
+    }
+
+    // Distance penalty: prefer closer targets (minor factor)
+    float dist = healer->GetExactDist2d(target);
+    float distPenalty = dist > 30.0f ? 0.8f : 1.0f;
+
+    // Moderate intelligence: role + deficit
+    if (intelligence < 0.5f)
+        return deficit * roleWeight * distPenalty;
+
+    // Smart: role + deficit + incoming damage
+    return deficit * roleWeight * incomingFactor * distPenalty;
 }
 
 // --- Utility-Based Action Evaluation ---
@@ -2842,7 +2916,13 @@ BotNavigationContext BotBGAIMgr::ComputePotentialField(
     }
     // Personality modulation on top of Q-learned (or default) base
     if (isFC) wObj = std::max(wObj, 1.5f);
-    if (isHealer) { wRepulsion = std::min(wRepulsion, 0.15f); wPresence = std::min(wPresence, 0.05f); }
+    if (isHealer)
+    {
+        wRepulsion = std::min(wRepulsion, 0.15f); // stay near allies
+        wPresence = std::min(wPresence, 0.05f);   // don't avoid allied clusters
+        wObj *= 0.7f;                              // reduced objective pull (don't stand on flag)
+        wEnemy = std::max(wEnemy, 0.35f);          // stronger enemy avoidance (stay at range)
+    }
     else
     {
         wRepulsion *= (0.75f + (1.0f - p.groupTendency) * 0.5f);

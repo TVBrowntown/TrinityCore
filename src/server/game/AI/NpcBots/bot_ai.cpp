@@ -1251,6 +1251,9 @@ void bot_ai::BuffAndHealGroup(uint32 diff)
 {
     if (GC_Timer > diff) return;
     if (me->IsMounted() && !IsWanderer()) return;
+    // BG fake casting: high-intelligence healers cancel casts to bait interrupts
+    if (IsCasting() && TryBGFakeCast(diff))
+        return; // just cancelled cast — skip this tick, will recast next tick
     if (IsCasting() || Feasting()) return;
 
     if (IAmFree())
@@ -1272,9 +1275,23 @@ void bot_ai::BuffAndHealGroup(uint32 diff)
         });
         if (!targets2.empty() && BuffTarget(targets2.size() == 1 ? targets2.front() : Bcore::Containers::SelectRandomContainerElement(targets2), diff))
             return;
-        for (Unit* heal_target : targets2)
-            if (GetHealthPCT(heal_target) < 95 && urand(1, 100) <= (30 + 30*uint32(!!GetBG())) && HealTarget(heal_target, diff))
-                break;
+        // BG triage: pick highest-priority target instead of random iteration
+        if (GetBG() && !targets2.empty())
+        {
+            // Filter to targets needing heals
+            std::list<Unit*> healCandidates;
+            for (Unit* u : targets2)
+                if (GetHealthPCT(u) < 95)
+                    healCandidates.push_back(u);
+            if (Unit* best = SelectBGHealTarget(healCandidates))
+                HealTarget(best, diff);
+        }
+        else
+        {
+            for (Unit* heal_target : targets2)
+                if (GetHealthPCT(heal_target) < 95 && urand(1, 100) <= 30 && HealTarget(heal_target, diff))
+                    break;
+        }
 
         return;
     }
@@ -1321,7 +1338,8 @@ void bot_ai::BuffAndHealGroup(uint32 diff)
                 targets3.push_back(c);
             }
 
-            if (!targets3.empty() && HealTarget(Bcore::Containers::SelectRandomContainerElement(targets3), diff))
+            if (!targets3.empty() && HealTarget(
+                GetBG() ? SelectBGHealTarget(targets3) : Bcore::Containers::SelectRandomContainerElement(targets3), diff))
                 return;
         }
         //buffs
@@ -1435,7 +1453,8 @@ void bot_ai::BuffAndHealGroup(uint32 diff)
                 }
             }
         }
-        if (!targets5.empty() && HealTarget(Bcore::Containers::SelectRandomContainerElement(targets5), diff))
+        if (!targets5.empty() && HealTarget(
+            GetBG() ? SelectBGHealTarget(targets5) : Bcore::Containers::SelectRandomContainerElement(targets5), diff))
             return;
     }
     //buffs
@@ -16621,6 +16640,8 @@ void bot_ai::JustDied(Unit* u)
         _bgHasObjective = false;
         _bgInterruptDelayTimer = 0;
         _bgInterruptTargetGuid.Clear();
+        _bgFakeCastCooldown = 0;
+        _bgFakeCastPending = false;
 
         // Class matchup: they killed me
         if (u)
@@ -21838,6 +21859,95 @@ bool bot_ai::ShouldBGApplyCC(Unit* target, BGDRCategory drCategory)
         if (drMult < 1.0f && !BotBGAIMgr::IntelligenceCheck(p.intelligence))
             return false; // sometimes skip half-DR targets too
     }
+
+    return true;
+}
+
+Unit* bot_ai::SelectBGHealTarget(std::list<Unit*> const& targets) const
+{
+    Battleground const* bg = GetBG();
+    if (!bg || targets.empty())
+        return nullptr;
+
+    TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
+
+    Unit* bestTarget = nullptr;
+    float bestScore = -1.0f;
+
+    for (Unit* target : targets)
+    {
+        float score = BotBGAIMgr::ComputeHealPriority(me, target, bg, myTeamId, p.intelligence);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestTarget = target;
+        }
+    }
+
+    return bestTarget;
+}
+
+bool bot_ai::TryBGFakeCast(uint32 diff)
+{
+    Battleground* bg = GetBG();
+    if (!bg || !me->GetMap()->IsBattlegroundOrArena())
+        return false;
+
+    // Tick down fake cast cooldown
+    if (_bgFakeCastCooldown > diff) { _bgFakeCastCooldown -= diff; }
+    else { _bgFakeCastCooldown = 0; }
+
+    // Only healers with very high intelligence fake cast
+    if (!HasRole(BOT_ROLE_HEAL))
+        return false;
+
+    BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
+    if (p.intelligence < 0.85f)
+        return false;
+
+    // On cooldown
+    if (_bgFakeCastCooldown > 0)
+        return false;
+
+    // Must be currently casting a heal (non-instant, non-channeled)
+    if (!me->HasUnitState(UNIT_STATE_CASTING))
+        return false;
+    Spell const* curSpell = me->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+    if (!curSpell)
+        return false;
+
+    // Only juke if cast is 70-90% complete (convincing bait)
+    uint32 castTime = curSpell->GetCastTime();
+    uint32 elapsed = curSpell->GetTimer();
+    if (castTime == 0 || elapsed == 0)
+        return false;
+    float progress = 1.0f - float(elapsed) / float(castTime);
+    if (progress < 0.7f || progress > 0.92f)
+        return false;
+
+    // Check if an enemy with interrupt capability is targeting us
+    bool interruptThreat = false;
+    for (auto const& attacker : me->getAttackers())
+    {
+        if (!attacker || !attacker->IsAlive() || me->GetExactDist2d(attacker) > 10.0f)
+            continue;
+        // Simplified check: melee attacker within 10 yards likely has a kick
+        interruptThreat = true;
+        break;
+    }
+
+    if (!interruptThreat)
+        return false;
+
+    // 35% chance to juke this cast (don't always do it — unpredictable)
+    if (urand(1, 100) > 35)
+        return false;
+
+    // Cancel the current cast (fake cast / juke)
+    me->InterruptNonMeleeSpells(false);
+    _bgFakeCastCooldown = urand(8000, 15000); // don't juke again for 8-15 seconds
+    _bgFakeCastPending = true;
 
     return true;
 }

@@ -544,6 +544,11 @@ public:
     // Compute intelligence-based interrupt reaction delay (milliseconds)
     static uint32 ComputeInterruptDelay(float intelligence);
 
+    // BG heal triage: score a potential heal target by role importance + health deficit
+    // Returns priority score (higher = heal first). Intelligence gates triage quality.
+    static float ComputeHealPriority(Unit const* healer, Unit const* target, Battleground const* bg,
+        TeamId healerTeamId, float intelligence);
+
     // Q-Learning
     static void LoadQTableFromDB();
     static void FlushQTableToDB();

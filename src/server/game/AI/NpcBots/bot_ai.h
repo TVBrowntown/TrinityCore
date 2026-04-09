@@ -234,6 +234,10 @@ public:
     bool CanBGInterrupt(Unit* target, uint32 diff);
     // Combat intelligence: check if CC should be applied (DR awareness)
     bool ShouldBGApplyCC(Unit* target, BGDRCategory drCategory);
+    // BG heal triage: pick highest-priority heal target from list
+    Unit* SelectBGHealTarget(std::list<Unit*> const& targets) const;
+    // BG fake casting: high-intelligence healers cancel casts to bait interrupts
+    bool TryBGFakeCast(uint32 diff);
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
@@ -815,6 +819,8 @@ private:
     uint32 _bgObjectiveCapsCount{};
     uint32 _bgInterruptDelayTimer{};    // ticks down before bot attempts interrupt
     ObjectGuid _bgInterruptTargetGuid;  // which enemy cast we're delaying for
+    uint32 _bgFakeCastCooldown{};       // cooldown between fake cast attempts (prevents spam)
+    bool _bgFakeCastPending{};          // true = just cancelled a cast, waiting to recast
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
