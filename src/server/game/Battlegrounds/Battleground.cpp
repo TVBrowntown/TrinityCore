@@ -978,22 +978,22 @@ void Battleground::EndBattleground(uint32 winner)
 
         float reward = won ? 1.0f : -0.5f;
         reward += float(bot->GetBotAI()->GetBGMatchKills()) * 0.1f;
-        reward -= float(bot->GetBotAI()->GetBGMatchDeaths()) * 0.15f;
         reward += float(bot->GetBotAI()->GetBGObjectiveCaps()) * 0.3f;
         reward += float(scoreDiff) * 0.01f;
 
-        // Role-specific reward components (use universally available stats)
+        // Role-specific reward: healers get reduced death penalty + healing credit
         auto scoreIt = BotScores.find(guid);
+        bool isHealer = bot->GetBotAI()->HasRole(BOT_ROLE_HEAL);
+        float deathPenalty = isHealer ? 0.10f : 0.15f; // healers penalized less (they die more from being focused)
+        reward -= float(bot->GetBotAI()->GetBGMatchDeaths()) * deathPenalty;
+
         if (scoreIt != BotScores.end())
         {
-            bool isHealer = bot->GetBotAI()->HasRole(BOT_ROLE_HEAL);
             if (isHealer)
             {
                 // Healers: reward for healing done (normalized, ~50k healing = +0.5)
                 uint32 healDone = scoreIt->second->GetHealingDone();
                 reward += std::min(float(healDone) * 0.00001f, 0.5f);
-                // Healers shouldn't be penalized as heavily for low kills
-                reward += float(bot->GetBotAI()->GetBGMatchDeaths()) * 0.05f; // partially offset death penalty
             }
             else
             {
