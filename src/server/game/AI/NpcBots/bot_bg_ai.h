@@ -224,7 +224,7 @@ struct BGTeamPlan
 struct BGEnemySighting { float posX, posY; uint32 lastSeenTime; uint8 enemyClass; };
 
 enum BGIntentType : uint8 { INTENT_ATTACK_FLAG=0, INTENT_DEFEND_FLAG=1, INTENT_ESCORT_FC=2,
-    INTENT_ATTACK_NODE=3, INTENT_DEFEND_NODE=4, INTENT_ROAM=5, INTENT_CHASE_FC=6, INTENT_MAX=7 };
+    INTENT_ATTACK_NODE=3, INTENT_DEFEND_NODE=4, INTENT_ROAM=5, INTENT_CHASE_FC=6, INTENT_RETREAT=7, INTENT_MAX=8 };
 struct BGBotIntention { uint8 intentType; uint8 targetNodeIdx; uint32 timestamp; };
 struct BGTeamCooldown { uint32 expiryTime; uint8 cooldownType; };
 struct BGPatrolPoint { float x, y; float engagementScore; };
@@ -543,6 +543,11 @@ public:
 
     // Compute intelligence-based interrupt reaction delay (milliseconds)
     static uint32 ComputeInterruptDelay(float intelligence);
+
+    // BG defensive CD urgency: returns multiplier (0.5-2.0) for HP thresholds
+    // >1.0 = pop defensives earlier (more urgent), <1.0 = delay (healer nearby, safe)
+    static float ComputeDefensiveUrgency(Creature const* me, Battleground const* bg,
+        TeamId teamId, float intelligence);
 
     // BG heal triage: score a potential heal target by role importance + health deficit
     // Returns priority score (higher = heal first). Intelligence gates triage quality.

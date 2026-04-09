@@ -461,6 +461,70 @@ float BotBGAIMgr::GetTeamBurstAvailability(uint32 bgInstanceId, TeamId teamId)
     return 1.0f - float(onCD) / float(total);
 }
 
+float BotBGAIMgr::ComputeDefensiveUrgency(Creature const* me, Battleground const* bg,
+    TeamId teamId, float intelligence)
+{
+    if (!me || !bg) return 1.0f;
+
+    float urgency = 1.0f;
+
+    // Dumb bots: no context awareness, use default thresholds
+    if (intelligence < 0.3f)
+        return 1.0f;
+
+    // Check if a healer is nearby and alive
+    bool healerNearby = false;
+    for (auto const& [guid, botData] : bg->GetBots())
+    {
+        uint32 myTeamVal = teamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+        if (botData.Team != myTeamVal) continue;
+        Creature const* ally = ObjectAccessor::GetCreature(*me, guid);
+        if (!ally || !ally->IsAlive() || ally == me) continue;
+        if (ally->GetBotAI() && ally->GetBotAI()->HasRole(BOT_ROLE_HEAL) &&
+            me->GetExactDist2d(ally) < 30.0f)
+        {
+            healerNearby = true;
+            break;
+        }
+    }
+
+    // Healer nearby: delay defensives (they'll keep us alive)
+    if (healerNearby)
+        urgency *= 0.7f;
+
+    // Flag carrier: pop defensives earlier (staying alive is critical)
+    bool isFC = false;
+    if (bg->GetTypeID() == BATTLEGROUND_WS)
+    {
+        TeamId enemyTeamId = teamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+        if (bg->GetFlagPickerGUID(enemyTeamId) == me->GetGUID()) isFC = true;
+    }
+    else if (bg->GetTypeID() == BATTLEGROUND_EY)
+    {
+        BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+        if (ey && ey->GetFlagPickerGUID() == me->GetGUID()) isFC = true;
+    }
+    if (isFC)
+        urgency *= 1.5f;
+
+    // Multiple attackers: scale up urgency
+    uint8 attackerCount = 0;
+    for (auto const& attacker : me->getAttackers())
+        if (attacker && attacker->IsAlive()) ++attackerCount;
+    if (attackerCount >= 3)
+        urgency *= 1.3f;
+
+    // Smart bots: if team burst is spent, play more defensively
+    if (intelligence >= 0.5f)
+    {
+        float burstAvail = GetTeamBurstAvailability(bg->GetInstanceID(), teamId);
+        if (burstAvail < 0.3f)
+            urgency *= 1.2f; // team has no burst, survive longer
+    }
+
+    return std::clamp(urgency, 0.5f, 2.0f);
+}
+
 void BotBGAIMgr::ClearOffensiveCDs(uint32 bgInstanceId)
 {
     std::unique_lock lock(_lock);

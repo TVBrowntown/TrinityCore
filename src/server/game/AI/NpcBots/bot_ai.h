@@ -238,6 +238,10 @@ public:
     Unit* SelectBGHealTarget(std::list<Unit*> const& targets) const;
     // BG fake casting: high-intelligence healers cancel casts to bait interrupts
     bool TryBGFakeCast(uint32 diff);
+    // BG defensive urgency: multiplier for HP thresholds (>1 = pop earlier, <1 = delay)
+    float GetBGDefensiveUrgency() const;
+    // BG disengage: should this bot break off combat and retreat?
+    bool ShouldBGRetreat(uint32 diff);
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
