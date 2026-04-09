@@ -19597,11 +19597,11 @@ void bot_ai::Evade()
                             blendedDirY = navCtx.finalDirY;
                         }
 
-                        // FC path variety: high-intelligence flag carriers add random angular
+                        // FC path variety: high-intelligence flag carriers add small angular
                         // offset to be less predictable. Makes interception harder.
                         if (botIsFC && routePersonality.intelligence >= 0.7f)
                         {
-                            float deviationAngle = frand(-0.4f, 0.4f); // +/- ~23 degrees
+                            float deviationAngle = frand(-0.15f, 0.15f); // +/- ~9 degrees (subtle)
                             float cosD = std::cos(deviationAngle), sinD = std::sin(deviationAngle);
                             float newDirX = blendedDirX * cosD - blendedDirY * sinD;
                             float newDirY = blendedDirX * sinD + blendedDirY * cosD;
@@ -19822,15 +19822,27 @@ void bot_ai::Evade()
                         }
                     }
 
-                    // Visual authenticity: rare random jump while moving (not in combat)
+                    // Visual authenticity: rare random hop while moving (not in combat)
                     // Players hop occasionally while running across the map
                     if (me->GetMap()->IsBattlegroundOrArena() && !me->IsInCombat() &&
                         !JumpingOrFalling() && urand(1, 100) <= 4) // ~4% chance per movement tick
                     {
-                        // Small forward hop — just a visual jump, same destination
-                        Position jumpPos = pos;
-                        BotMovement(BOT_MOVE_JUMP, &jumpPos, nullptr, false);
-                        return;
+                        // Small forward hop (3-4 yards) — not a full jump to destination
+                        float hopDist = frand(3.0f, 4.0f);
+                        float orient = me->GetOrientation();
+                        Position hopPos;
+                        hopPos.Relocate(
+                            me->GetPositionX() + std::cos(orient) * hopDist,
+                            me->GetPositionY() + std::sin(orient) * hopDist,
+                            me->GetPositionZ());
+                        float hopGround = hopPos.m_positionZ;
+                        me->UpdateGroundPositionZ(hopPos.m_positionX, hopPos.m_positionY, hopGround);
+                        if (hopGround > INVALID_HEIGHT)
+                        {
+                            hopPos.m_positionZ = hopGround;
+                            BotMovement(BOT_MOVE_JUMP, &hopPos, nullptr, false);
+                        }
+                        // Don't return — still issue normal movement command after the hop
                     }
 
                     // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
