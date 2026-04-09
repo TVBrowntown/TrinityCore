@@ -238,13 +238,17 @@ enum BGUtilityAction : uint8 {
     BG_UTIL_ESCORT_FRIENDLY_FC,
     BG_UTIL_DEFEND_OWN_FLAG,
     BG_UTIL_FIGHT_MIDFIELD,
+    BG_UTIL_RETURN_DROPPED_FLAG,    // WSG: our flag dropped on ground, return it
+    BG_UTIL_PROTECT_FC,             // WSG: peel attackers off our FC
     // AB/EY node actions (targetNode specifies which)
     BG_UTIL_ATTACK_NODE,
     BG_UTIL_DEFEND_NODE,
     BG_UTIL_REINFORCE_NODE,
+    BG_UTIL_RESPOND_NODE_ATTACK,    // AB/EY: enemies near our node but not yet contested
     // EY flag
     BG_UTIL_GRAB_NEUTRAL_FLAG,
     BG_UTIL_DELIVER_NEUTRAL_FLAG,
+    BG_UTIL_CHASE_NEUTRAL_FC,      // EY: enemy grabbed Netherstorm flag
     BG_UTIL_MAX
 };
 

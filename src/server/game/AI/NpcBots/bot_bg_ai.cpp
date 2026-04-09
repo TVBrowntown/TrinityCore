@@ -367,6 +367,47 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 addCandidate(BG_UTIL_ESCORT_FRIENDLY_FC, score, fcPos, 1, INTENT_ESCORT_FC);
             }
 
+            // --- RETURN DROPPED FLAG (immediate — our flag is on the ground) ---
+            {
+                BattlegroundWS* ws = const_cast<BattlegroundWS*>(dynamic_cast<BattlegroundWS const*>(bg));
+                if (ws)
+                {
+                    uint32 myTeam = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+                    uint8 myFlagState = ws->GetFlagState(myTeam);
+                    if (myFlagState == BG_WS_FLAG_STATE_ON_GROUND)
+                    {
+                        // Our flag is dropped — returning it is very urgent
+                        ObjectGuid droppedGuid = ws->GetDroppedFlagGUID(myTeam);
+                        GameObject const* droppedFlag = !droppedGuid.IsEmpty()
+                            ? ObjectAccessor::GetGameObject(*me, droppedGuid) : nullptr;
+                        Position flagPos(myFlagX, myFlagY, myFlagZ);
+                        if (droppedFlag)
+                            flagPos.Relocate(droppedFlag->GetPositionX(), droppedFlag->GetPositionY(), droppedFlag->GetPositionZ());
+
+                        float dist = me->GetExactDist2d(flagPos);
+                        float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                        float score = 0.92f * distFactor; // very high — almost as urgent as FC delivering
+                        addCandidate(BG_UTIL_RETURN_DROPPED_FLAG, score, flagPos, 1, INTENT_DEFEND_FLAG);
+                    }
+                }
+            }
+
+            // --- PROTECT FC (immediate — our FC is under attack) ---
+            if (weHaveTheirFlag)
+            {
+                Unit* friendlyFC2 = ObjectAccessor::GetUnit(*me, friendlyFCGuid);
+                if (friendlyFC2 && friendlyFC2->IsAlive() && friendlyFC2->IsInCombat())
+                {
+                    float dist = me->GetExactDist2d(friendlyFC2);
+                    float distFactor = std::max(0.0f, 1.0f - dist / 300.0f);
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
+                    float score = (0.80f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    addCandidate(BG_UTIL_PROTECT_FC, score,
+                        Position(friendlyFC2->GetPositionX(), friendlyFC2->GetPositionY(), friendlyFC2->GetPositionZ()),
+                        1, INTENT_ESCORT_FC);
+                }
+            }
+
             // --- DEFEND OWN FLAG (only if flag is actually at base) ---
             if (!enemyHasOurFlag)
             {
@@ -448,6 +489,30 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                             Position(nodeX, nodeY, nodeZ), 1, INTENT_ATTACK_NODE, n);
                     }
                 }
+
+                // RESPOND TO NODE ATTACK: our node not yet contested but enemies nearby
+                if (ours && !contested)
+                {
+                    // Count enemy bots near this node
+                    uint8 enemiesNear = 0;
+                    uint32 enemyTeamVal = myTeamVal == ALLIANCE ? HORDE : ALLIANCE;
+                    for (auto const& [guid, botData] : bg->GetBots())
+                    {
+                        if (botData.Team != enemyTeamVal) continue;
+                        Creature const* enemy = ObjectAccessor::GetCreature(*me, guid);
+                        if (!enemy || !enemy->IsAlive()) continue;
+                        float eDist = std::sqrt(
+                            (enemy->GetPositionX()-nodeX)*(enemy->GetPositionX()-nodeX) +
+                            (enemy->GetPositionY()-nodeY)*(enemy->GetPositionY()-nodeY));
+                        if (eDist < 40.0f) ++enemiesNear;
+                    }
+                    if (enemiesNear > 0)
+                    {
+                        float score = (0.72f + float(enemiesNear) * 0.05f) * distFactor;
+                        addCandidate(BG_UTIL_RESPOND_NODE_ATTACK, score,
+                            Position(nodeX, nodeY, nodeZ), 2, INTENT_DEFEND_NODE, n);
+                    }
+                }
             }
 
             // FIGHT MIDFIELD (roaming)
@@ -527,7 +592,24 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 }
             }
 
-            // Point control (same pattern as AB)
+            // Chase enemy FC (enemy grabbed the Netherstorm flag)
+            if (flagPickedUp)
+            {
+                Unit* enemyFC = ObjectAccessor::GetUnit(*me, eyFCGuid);
+                if (enemyFC && enemyFC->IsAlive() && bg->GetBotTeamId(enemyFC->GetGUID()) != myTeamId)
+                {
+                    float dist = me->GetExactDist2d(enemyFC);
+                    float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
+                    float score = (0.78f + p.aggression * 0.1f) * distFactor - stacking;
+                    addCandidate(BG_UTIL_CHASE_NEUTRAL_FC, score,
+                        Position(enemyFC->GetPositionX(), enemyFC->GetPositionY(), enemyFC->GetPositionZ()),
+                        1, INTENT_CHASE_FC);
+                }
+            }
+
+            // Point control
+            uint32 eyEnemyTeamVal = myTeamVal == ALLIANCE ? HORDE : ALLIANCE;
             for (uint8 pt = 0; pt < EY_POINTS_MAX; ++pt)
             {
                 float ptX = BG_EY_TriggerPositions[pt].GetPositionX();
@@ -555,6 +637,41 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     if (pointsHeld <= 2) score += 0.12f;
                     addCandidate(BG_UTIL_DEFEND_NODE, score,
                         Position(ptX, ptY, ptZ), 2, INTENT_DEFEND_NODE, pt);
+                }
+
+                // Respond to enemies near our point (not yet contesting)
+                if (ours)
+                {
+                    uint8 enemiesNear = 0;
+                    for (auto const& [guid, botData] : bg->GetBots())
+                    {
+                        if (botData.Team != eyEnemyTeamVal) continue;
+                        Creature const* enemy = ObjectAccessor::GetCreature(*me, guid);
+                        if (!enemy || !enemy->IsAlive()) continue;
+                        if (std::sqrt((enemy->GetPositionX()-ptX)*(enemy->GetPositionX()-ptX) +
+                            (enemy->GetPositionY()-ptY)*(enemy->GetPositionY()-ptY)) < 40.0f)
+                            ++enemiesNear;
+                    }
+                    if (enemiesNear > 0)
+                    {
+                        float score = (0.72f + float(enemiesNear) * 0.05f) * distFactor;
+                        addCandidate(BG_UTIL_RESPOND_NODE_ATTACK, score,
+                            Position(ptX, ptY, ptZ), 2, INTENT_DEFEND_NODE, pt);
+                    }
+                }
+
+                // Reinforce: EY doesn't have formal contested state, but if enemy
+                // recently took a point we owned, treat it as contested
+                if (!ours && owner != TEAM_NEUTRAL)
+                {
+                    // Enemy owns it — check if allies are fighting there
+                    uint8 alliesNear = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_NODE, pt);
+                    if (alliesNear > 0 && alliesNear < 4)
+                    {
+                        float score = (0.75f + p.aggression * 0.1f + p.groupTendency * 0.1f) * distFactor;
+                        addCandidate(BG_UTIL_REINFORCE_NODE, score,
+                            Position(ptX, ptY, ptZ), 1, INTENT_ATTACK_NODE, pt);
+                    }
                 }
             }
 
