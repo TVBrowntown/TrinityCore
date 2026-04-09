@@ -531,14 +531,8 @@ float BotBGAIMgr::ComputeHealPriority(Unit const* healer, Unit const* target, Ba
     if (intelligence >= 0.5f && target->IsInCombat())
     {
         uint8 attackerCount = 0;
-        for (auto const& [_, ref] : target->GetThreatManager().GetThreatenedByMeList())
-            (void)ref, ++attackerCount;
-        // Simple proxy: count attackers targeting this unit
-        if (target->GetVictim())
-        {
-            for (auto const& attacker : target->getAttackers())
-                if (attacker && attacker->IsAlive()) ++attackerCount;
-        }
+        for (auto const& attacker : target->getAttackers())
+            if (attacker && attacker->IsAlive()) ++attackerCount;
         incomingFactor = 1.0f + float(attackerCount) * 0.15f;
     }
 

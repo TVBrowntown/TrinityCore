@@ -16641,7 +16641,6 @@ void bot_ai::JustDied(Unit* u)
         _bgInterruptDelayTimer = 0;
         _bgInterruptTargetGuid.Clear();
         _bgFakeCastCooldown = 0;
-        _bgFakeCastPending = false;
 
         // Class matchup: they killed me
         if (u)
@@ -21918,9 +21917,9 @@ bool bot_ai::TryBGFakeCast(uint32 diff)
         return false;
 
     // Only juke if cast is 70-90% complete (convincing bait)
-    uint32 castTime = curSpell->GetCastTime();
-    uint32 elapsed = curSpell->GetTimer();
-    if (castTime == 0 || elapsed == 0)
+    int32 castTime = curSpell->GetCastTime();
+    int32 elapsed = curSpell->GetTimer();
+    if (castTime <= 0 || elapsed <= 0)
         return false;
     float progress = 1.0f - float(elapsed) / float(castTime);
     if (progress < 0.7f || progress > 0.92f)
@@ -21947,7 +21946,6 @@ bool bot_ai::TryBGFakeCast(uint32 diff)
     // Cancel the current cast (fake cast / juke)
     me->InterruptNonMeleeSpells(false);
     _bgFakeCastCooldown = urand(8000, 15000); // don't juke again for 8-15 seconds
-    _bgFakeCastPending = true;
 
     return true;
 }

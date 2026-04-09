@@ -820,7 +820,6 @@ private:
     uint32 _bgInterruptDelayTimer{};    // ticks down before bot attempts interrupt
     ObjectGuid _bgInterruptTargetGuid;  // which enemy cast we're delaying for
     uint32 _bgFakeCastCooldown{};       // cooldown between fake cast attempts (prevents spam)
-    bool _bgFakeCastPending{};          // true = just cancelled a cast, waiting to recast
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
