@@ -893,6 +893,7 @@ public:
 
             if (Unit* target = FindCastingTarget(CalcSpellMaxRange(WIND_SHEAR_1), 0, WIND_SHEAR_1))
             {
+                if (!CanBGInterrupt(target, diff)) return;
                 me->InterruptNonMeleeSpells(false);
                 if (doCast(target, GetSpell(WIND_SHEAR_1)))
                     return;

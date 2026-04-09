@@ -225,6 +225,7 @@ public:
             {
                 if (Unit* target = FindCastingTarget(CalcSpellMaxRange(COUNTERSPELL_1), 0, COUNTERSPELL_1))
                 {
+                    if (!CanBGInterrupt(target, diff)) return;
                     me->InterruptNonMeleeSpells(false);
                     if (doCast(target, GetSpell(COUNTERSPELL_1)))
                         return;

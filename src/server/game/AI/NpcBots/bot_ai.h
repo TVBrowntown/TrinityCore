@@ -229,6 +229,11 @@ public:
     Position GetDefenseSpreadPosition(Position const& nodePos) const;
     void TriggerBGSpeedBoost();
     void CheckBGObjectiveProximity();
+    // Combat intelligence: intelligence-gated interrupt check for BGs
+    // Returns true if this bot should attempt an interrupt right now
+    bool CanBGInterrupt(Unit* target, uint32 diff);
+    // Combat intelligence: check if CC should be applied (DR awareness)
+    bool ShouldBGApplyCC(Unit* target, BGDRCategory drCategory);
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
@@ -808,6 +813,8 @@ private:
     uint16 _bgMatchKills{};
     uint16 _bgMatchDeaths{};
     uint32 _bgObjectiveCapsCount{};
+    uint32 _bgInterruptDelayTimer{};    // ticks down before bot attempts interrupt
+    ObjectGuid _bgInterruptTargetGuid;  // which enemy cast we're delaying for
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};

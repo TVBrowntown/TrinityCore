@@ -21750,6 +21750,96 @@ WanderNode const* bot_ai::GetNextBGTravelNode() const
     return nullptr;
 }
 
+// --- Combat Intelligence Helpers ---
+
+bool bot_ai::CanBGInterrupt(Unit* target, uint32 diff)
+{
+    // Outside BG: always allow (no change to PvE behavior)
+    Battleground* bg = GetBG();
+    if (!me->GetMap()->IsBattlegroundOrArena() || !bg)
+        return true;
+
+    BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
+
+    // Intelligence gate: dumb bots don't interrupt
+    if (p.intelligence < 0.3f)
+        return false;
+
+    // Probabilistic skip for moderate intelligence
+    if (p.intelligence < 0.5f && !BotBGAIMgr::IntelligenceCheck(p.intelligence))
+        return false;
+
+    // Reaction delay: bot must wait before interrupting
+    if (target && target->GetGUID() != _bgInterruptTargetGuid)
+    {
+        // New cast detected — start delay timer
+        _bgInterruptTargetGuid = target->GetGUID();
+        _bgInterruptDelayTimer = BotBGAIMgr::ComputeInterruptDelay(p.intelligence);
+        return false;
+    }
+
+    if (_bgInterruptDelayTimer > 0)
+    {
+        if (_bgInterruptDelayTimer > diff)
+            _bgInterruptDelayTimer -= diff;
+        else
+            _bgInterruptDelayTimer = 0;
+        return false;
+    }
+
+    // Check interrupt claim system: don't double-kick
+    TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    if (target && BotBGAIMgr::HasInterruptClaim(bg->GetInstanceID(), myTeamId, target->GetGUID(), me->GetGUID()))
+        return false; // someone else claimed this interrupt
+
+    // Claim it for ourselves
+    if (target && p.intelligence >= 0.85f)
+        BotBGAIMgr::ClaimInterrupt(bg->GetInstanceID(), myTeamId, me->GetGUID(), target->GetGUID());
+
+    return true;
+}
+
+bool bot_ai::ShouldBGApplyCC(Unit* target, BGDRCategory drCategory)
+{
+    // Outside BG: always allow
+    Battleground* bg = GetBG();
+    if (!me->GetMap()->IsBattlegroundOrArena() || !bg || !target)
+        return true;
+
+    if (drCategory == DR_NONE)
+        return true;
+
+    BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
+
+    // Dumb bots don't check DR at all — chain CC blindly
+    if (p.intelligence < 0.3f)
+        return true;
+
+    uint32 bgInstId = bg->GetInstanceID();
+
+    // Basic: don't CC immune targets
+    if (p.intelligence >= 0.3f && BotBGAIMgr::IsTargetDRImmune(bgInstId, target->GetGUID(), drCategory))
+        return false;
+
+    // Smart: avoid wasting CC on diminished targets (half or quarter duration)
+    if (p.intelligence >= 0.5f)
+    {
+        float drMult = BotBGAIMgr::GetDRMultiplier(bgInstId, target->GetGUID(), drCategory);
+        if (drMult < 0.25f)
+            return false; // less than quarter — not worth it
+    }
+
+    // Very smart: prefer targets with full DR
+    if (p.intelligence >= 0.7f)
+    {
+        float drMult = BotBGAIMgr::GetDRMultiplier(bgInstId, target->GetGUID(), drCategory);
+        if (drMult < 1.0f && !BotBGAIMgr::IntelligenceCheck(p.intelligence))
+            return false; // sometimes skip half-DR targets too
+    }
+
+    return true;
+}
+
 void bot_ai::SelectBGStrategy()
 {
     BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());

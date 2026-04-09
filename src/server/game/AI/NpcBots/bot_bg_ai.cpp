@@ -253,6 +253,226 @@ uint32 BotBGAIMgr::SelectStrategy(uint32 mapId, float intelligence)
     return 0;
 }
 
+// --- Phase 1: Combat Intelligence Systems ---
+
+// Helper: make team key from instance + team
+static uint64 MakeCombatKey(uint32 bgInstanceId, TeamId teamId)
+{
+    return (uint64(bgInstanceId) << 1) | uint64(teamId);
+}
+
+// Helper: make DR key from target GUID counter + category
+// Uses low 32 bits of GUID (unique per creature) combined with category
+static uint64 MakeDRKey(ObjectGuid targetGuid, BGDRCategory category)
+{
+    return (uint64(targetGuid.GetCounter()) << 8) | uint64(category);
+}
+
+// --- 1.1 Interrupt Claim System ---
+
+bool BotBGAIMgr::ClaimInterrupt(uint32 bgInstanceId, TeamId teamId, ObjectGuid claimerGuid, ObjectGuid targetGuid)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::unique_lock lock(_lock);
+
+    auto& claims = _interruptClaims[key];
+
+    // Prune expired claims
+    for (auto it = claims.begin(); it != claims.end();)
+    {
+        if (now > it->second.expiryTime)
+            it = claims.erase(it);
+        else
+            ++it;
+    }
+
+    // Check if someone else already claimed this target
+    auto it = claims.find(targetGuid);
+    if (it != claims.end() && it->second.claimerGuid != claimerGuid)
+        return false; // someone else has it
+
+    // Claim it
+    claims[targetGuid] = BGInterruptClaim{ claimerGuid, targetGuid, now, now + 4000 };
+    return true;
+}
+
+bool BotBGAIMgr::HasInterruptClaim(uint32 bgInstanceId, TeamId teamId, ObjectGuid targetGuid, ObjectGuid excludeBot)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::shared_lock lock(_lock);
+
+    auto mapIt = _interruptClaims.find(key);
+    if (mapIt == _interruptClaims.end()) return false;
+
+    auto it = mapIt->second.find(targetGuid);
+    if (it == mapIt->second.end()) return false;
+    if (now > it->second.expiryTime) return false; // expired
+    if (!excludeBot.IsEmpty() && it->second.claimerGuid == excludeBot) return false; // our own claim
+    return true;
+}
+
+void BotBGAIMgr::ClearInterruptClaims(uint32 bgInstanceId)
+{
+    std::unique_lock lock(_lock);
+    // Clear both teams
+    _interruptClaims.erase(MakeCombatKey(bgInstanceId, TEAM_ALLIANCE));
+    _interruptClaims.erase(MakeCombatKey(bgInstanceId, TEAM_HORDE));
+}
+
+// --- 1.2 Diminishing Returns Tracker ---
+
+void BotBGAIMgr::RecordCCApplication(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category)
+{
+    if (category == DR_NONE) return;
+    uint64 drKey = MakeDRKey(targetGuid, category);
+    uint32 now = getMSTime();
+    std::unique_lock lock(_lock);
+
+    auto& entry = _drTracking[bgInstanceId][drKey];
+    // DR resets after 18 seconds of no applications
+    if (now - entry.lastApplicationTime > 18000)
+        entry.stacks = 0;
+
+    entry.lastApplicationTime = now;
+    if (entry.stacks < 3)
+        entry.stacks++;
+}
+
+uint8 BotBGAIMgr::GetDRStacks(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category)
+{
+    if (category == DR_NONE) return 0;
+    uint64 drKey = MakeDRKey(targetGuid, category);
+    uint32 now = getMSTime();
+    std::shared_lock lock(_lock);
+
+    auto instIt = _drTracking.find(bgInstanceId);
+    if (instIt == _drTracking.end()) return 0;
+    auto it = instIt->second.find(drKey);
+    if (it == instIt->second.end()) return 0;
+    // DR resets after 18s
+    if (now - it->second.lastApplicationTime > 18000) return 0;
+    return it->second.stacks;
+}
+
+float BotBGAIMgr::GetDRMultiplier(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category)
+{
+    uint8 stacks = GetDRStacks(bgInstanceId, targetGuid, category);
+    switch (stacks)
+    {
+        case 0: return 1.0f;    // full duration
+        case 1: return 0.5f;    // half
+        case 2: return 0.25f;   // quarter
+        default: return 0.0f;   // immune
+    }
+}
+
+bool BotBGAIMgr::IsTargetDRImmune(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category)
+{
+    return GetDRStacks(bgInstanceId, targetGuid, category) >= 3;
+}
+
+void BotBGAIMgr::ClearDRTracking(uint32 bgInstanceId)
+{
+    std::unique_lock lock(_lock);
+    _drTracking.erase(bgInstanceId);
+}
+
+// --- 1.3 Burst Coordination ---
+
+void BotBGAIMgr::AnnounceBurstReady(uint32 bgInstanceId, TeamId teamId, ObjectGuid botGuid)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::unique_lock lock(_lock);
+
+    auto& readyList = _burstReadiness[key];
+
+    // Prune expired entries
+    std::erase_if(readyList, [now](BGBurstReadiness const& r) { return now > r.expiryTime; });
+
+    // Update or add
+    for (auto& r : readyList)
+    {
+        if (r.botGuid == botGuid)
+        {
+            r.readyTime = now;
+            r.expiryTime = now + 8000;
+            return;
+        }
+    }
+    readyList.push_back(BGBurstReadiness{ botGuid, now, now + 8000 });
+}
+
+uint8 BotBGAIMgr::CountBurstReady(uint32 bgInstanceId, TeamId teamId)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::shared_lock lock(_lock);
+
+    auto it = _burstReadiness.find(key);
+    if (it == _burstReadiness.end()) return 0;
+
+    uint8 count = 0;
+    for (auto const& r : it->second)
+        if (now <= r.expiryTime) ++count;
+    return count;
+}
+
+void BotBGAIMgr::ClearBurstReadiness(uint32 bgInstanceId)
+{
+    std::unique_lock lock(_lock);
+    _burstReadiness.erase(MakeCombatKey(bgInstanceId, TEAM_ALLIANCE));
+    _burstReadiness.erase(MakeCombatKey(bgInstanceId, TEAM_HORDE));
+}
+
+// --- 1.4 Cooldown-Aware Aggression ---
+
+void BotBGAIMgr::RecordOffensiveCDUsed(uint32 bgInstanceId, TeamId teamId, uint32 cooldownDurationMs)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::unique_lock lock(_lock);
+
+    auto& cdList = _offensiveCDExpiry[key];
+    // Prune expired
+    std::erase_if(cdList, [now](uint32 expiry) { return now > expiry; });
+    cdList.push_back(now + cooldownDurationMs);
+}
+
+float BotBGAIMgr::GetTeamBurstAvailability(uint32 bgInstanceId, TeamId teamId)
+{
+    uint64 key = MakeCombatKey(bgInstanceId, teamId);
+    uint32 now = getMSTime();
+    std::shared_lock lock(_lock);
+
+    auto it = _offensiveCDExpiry.find(key);
+    if (it == _offensiveCDExpiry.end()) return 1.0f; // no CDs tracked = assume all ready
+
+    uint8 total = uint8(it->second.size());
+    if (total == 0) return 1.0f;
+
+    uint8 onCD = 0;
+    for (uint32 expiry : it->second)
+        if (now < expiry) ++onCD;
+
+    return 1.0f - float(onCD) / float(total);
+}
+
+// --- Intelligence-Gated Interrupt Delay ---
+
+uint32 BotBGAIMgr::ComputeInterruptDelay(float intelligence)
+{
+    // Smart bots react fast, dumb bots react slow (or not at all)
+    // Returns milliseconds to wait before attempting interrupt
+    if (intelligence < 0.3f) return 99999; // effectively never (gated elsewhere too)
+    if (intelligence < 0.5f) return urand(1500, 2500);
+    if (intelligence < 0.7f) return urand(800, 1200);
+    if (intelligence < 0.85f) return urand(300, 800);
+    return urand(150, 400); // top tier: near-instant
+}
+
 // --- Utility-Based Action Evaluation ---
 
 BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(

@@ -856,7 +856,7 @@ public:
             if (IsSpellReady(SILENCE_1, diff, false))
             {
                 if (Unit* target = FindCastingTarget(CalcSpellMaxRange(SILENCE_1), 0, SILENCE_1))
-                    if (doCast(target, GetSpell(SILENCE_1)))
+                    if (CanBGInterrupt(target, diff) && doCast(target, GetSpell(SILENCE_1)))
                         return;
             }
             if (IsSpellReady(PSYCHIC_HORROR_1, diff))

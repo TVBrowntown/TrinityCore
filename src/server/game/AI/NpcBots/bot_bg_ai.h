@@ -229,6 +229,43 @@ struct BGBotIntention { uint8 intentType; uint8 targetNodeIdx; uint32 timestamp;
 struct BGTeamCooldown { uint32 expiryTime; uint8 cooldownType; };
 struct BGPatrolPoint { float x, y; float engagementScore; };
 
+// --- Phase 1: Combat Intelligence Systems ---
+
+// Interrupt claim: one bot claims the next interrupt on a target, others hold
+struct BGInterruptClaim {
+    ObjectGuid claimerGuid;     // who claimed it
+    ObjectGuid targetGuid;      // who is being interrupted
+    uint32 claimTime{0};        // when claimed
+    uint32 expiryTime{0};       // auto-expire after 4s
+};
+
+// DR categories for 3.3.5a WotLK
+enum BGDRCategory : uint8 {
+    DR_STUN = 0,
+    DR_FEAR,
+    DR_ROOT,
+    DR_SILENCE,
+    DR_INCAPACITATE,    // polymorph, hex, sap, gouge, repentance
+    DR_DISORIENT,       // blind, scatter shot
+    DR_HORROR,          // death coil, psychic horror
+    DR_CYCLONE,
+    DR_CHARGE,          // charge, intercept stun
+    DR_NONE = 0xFF
+};
+
+// DR state per target per category
+struct BGDREntry {
+    uint8 stacks{0};            // 0=full, 1=half, 2=quarter, 3=immune
+    uint32 lastApplicationTime{0}; // resets after 18s
+};
+
+// Burst readiness per bot
+struct BGBurstReadiness {
+    ObjectGuid botGuid;
+    uint32 readyTime{0};        // when announced ready
+    uint32 expiryTime{0};       // 8s expiry
+};
+
 // Utility-based action evaluation — bots choose between immediate needs and long-term goals
 enum BGUtilityAction : uint8 {
     // WSG actions
@@ -385,6 +422,16 @@ private:
     // Team cooldown communication per BG instance per team (runtime only)
     static inline std::unordered_map<uint64, std::vector<BGTeamCooldown>> _teamCooldowns;
 
+    // Combat intelligence (Phase 1, runtime only)
+    // Interrupt claims: key = (instanceId << 1) | teamId, value = per-target claims
+    static inline std::unordered_map<uint64, std::unordered_map<ObjectGuid, BGInterruptClaim>> _interruptClaims;
+    // DR tracking: key = instanceId, value = per-target per-category DR state
+    static inline std::unordered_map<uint32, std::unordered_map<uint64, BGDREntry>> _drTracking; // inner key = targetGuid | (category << 56)
+    // Burst readiness: key = (instanceId << 1) | teamId
+    static inline std::unordered_map<uint64, std::vector<BGBurstReadiness>> _burstReadiness;
+    // Offensive CDs on cooldown: key = (instanceId << 1) | teamId
+    static inline std::unordered_map<uint64, std::vector<uint32>> _offensiveCDExpiry; // list of expiry times
+
     // Q-Learning table: key = (role << 24) | (stateKey << 8) | action
     static inline std::unordered_map<uint32, BGQEntry> _qTable;
     static inline uint32 _qGamesPlayed{0};
@@ -469,6 +516,32 @@ public:
     static void BroadcastCooldown(uint32 bgInstanceId, TeamId teamId, uint32 durationMs, uint8 type = 0);
     static bool HasActiveTeamCooldown(uint32 bgInstanceId, TeamId teamId);
     static void ClearCooldowns(uint32 bgInstanceId);
+
+    // --- Combat Intelligence (Phase 1) ---
+
+    // Interrupt coordination: claim system prevents double-kicks
+    static bool ClaimInterrupt(uint32 bgInstanceId, TeamId teamId, ObjectGuid claimerGuid, ObjectGuid targetGuid);
+    static bool HasInterruptClaim(uint32 bgInstanceId, TeamId teamId, ObjectGuid targetGuid, ObjectGuid excludeBot = ObjectGuid::Empty);
+    static void ClearInterruptClaims(uint32 bgInstanceId);
+
+    // DR tracking: per-target per-category diminishing returns
+    static void RecordCCApplication(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category);
+    static uint8 GetDRStacks(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category);
+    static float GetDRMultiplier(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category);
+    static bool IsTargetDRImmune(uint32 bgInstanceId, ObjectGuid targetGuid, BGDRCategory category);
+    static void ClearDRTracking(uint32 bgInstanceId);
+
+    // Burst coordination: team burst windows
+    static void AnnounceBurstReady(uint32 bgInstanceId, TeamId teamId, ObjectGuid botGuid);
+    static uint8 CountBurstReady(uint32 bgInstanceId, TeamId teamId);
+    static void ClearBurstReadiness(uint32 bgInstanceId);
+
+    // Cooldown-aware aggression: track team offensive CD availability
+    static void RecordOffensiveCDUsed(uint32 bgInstanceId, TeamId teamId, uint32 cooldownDurationMs);
+    static float GetTeamBurstAvailability(uint32 bgInstanceId, TeamId teamId); // 0-1, 1 = all CDs ready
+
+    // Compute intelligence-based interrupt reaction delay (milliseconds)
+    static uint32 ComputeInterruptDelay(float intelligence);
 
     // Q-Learning
     static void LoadQTableFromDB();

@@ -998,6 +998,9 @@ void Battleground::EndBattleground(uint32 winner)
     BotBGAIMgr::ClearPresenceGrid(GetInstanceID());
     BotBGAIMgr::ClearIntentions(GetInstanceID());
     BotBGAIMgr::ClearCooldowns(GetInstanceID());
+    BotBGAIMgr::ClearInterruptClaims(GetInstanceID());
+    BotBGAIMgr::ClearDRTracking(GetInstanceID());
+    BotBGAIMgr::ClearBurstReadiness(GetInstanceID());
     //end npcbot
     for (BattlegroundPlayerMap::iterator itr = m_Players.begin(); itr != m_Players.end(); ++itr)
     {

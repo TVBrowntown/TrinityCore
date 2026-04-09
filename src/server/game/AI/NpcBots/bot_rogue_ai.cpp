@@ -358,7 +358,8 @@ public:
             }
             //Kick
             if (IsSpellReady(KICK_1, diff, false) && !stealthed && dist <= 5 && Rand() < 70 &&
-                energy >= ecost(KICK_1) && mytar->IsNonMeleeSpellCast(false,false,true))
+                energy >= ecost(KICK_1) && mytar->IsNonMeleeSpellCast(false,false,true) &&
+                CanBGInterrupt(mytar, diff))
             {
                 if (doCast(mytar, GetSpell(KICK_1)))
                     getenergy();
