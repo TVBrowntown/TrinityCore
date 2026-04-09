@@ -19597,6 +19597,18 @@ void bot_ai::Evade()
                             blendedDirY = navCtx.finalDirY;
                         }
 
+                        // FC path variety: high-intelligence flag carriers add random angular
+                        // offset to be less predictable. Makes interception harder.
+                        if (botIsFC && routePersonality.intelligence >= 0.7f)
+                        {
+                            float deviationAngle = frand(-0.4f, 0.4f); // +/- ~23 degrees
+                            float cosD = std::cos(deviationAngle), sinD = std::sin(deviationAngle);
+                            float newDirX = blendedDirX * cosD - blendedDirY * sinD;
+                            float newDirY = blendedDirX * sinD + blendedDirY * cosD;
+                            blendedDirX = newDirX;
+                            blendedDirY = newDirY;
+                        }
+
                         // Step distance: long enough for smooth movement, short enough for course corrections
                         float moveDist = frand(25.0f, 40.0f);
                         pos.Relocate(
@@ -19808,6 +19820,17 @@ void bot_ai::Evade()
                             // Don't move — let next tick pick a different direction
                             return;
                         }
+                    }
+
+                    // Visual authenticity: rare random jump while moving (not in combat)
+                    // Players hop occasionally while running across the map
+                    if (me->GetMap()->IsBattlegroundOrArena() && !me->IsInCombat() &&
+                        !JumpingOrFalling() && urand(1, 100) <= 4) // ~4% chance per movement tick
+                    {
+                        // Small forward hop — just a visual jump, same destination
+                        Position jumpPos = pos;
+                        BotMovement(BOT_MOVE_JUMP, &jumpPos, nullptr, false);
+                        return;
                     }
 
                     // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
