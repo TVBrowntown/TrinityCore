@@ -824,6 +824,7 @@ private:
     uint32 _bgInterruptDelayTimer{};    // ticks down before bot attempts interrupt
     ObjectGuid _bgInterruptTargetGuid;  // which enemy cast we're delaying for
     uint32 _bgFakeCastCooldown{};       // cooldown between fake cast attempts (prevents spam)
+    uint32 _bgRetreatCooldown{};        // cooldown between retreat checks (prevents spam)
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};

@@ -474,9 +474,9 @@ float BotBGAIMgr::ComputeDefensiveUrgency(Creature const* me, Battleground const
 
     // Check if a healer is nearby and alive
     bool healerNearby = false;
+    uint32 myTeamVal = teamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
     for (auto const& [guid, botData] : bg->GetBots())
     {
-        uint32 myTeamVal = teamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
         if (botData.Team != myTeamVal) continue;
         Creature const* ally = ObjectAccessor::GetCreature(*me, guid);
         if (!ally || !ally->IsAlive() || ally == me) continue;

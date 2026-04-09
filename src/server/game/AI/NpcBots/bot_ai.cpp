@@ -4852,12 +4852,18 @@ bool bot_ai::CheckAttackTarget()
             return false;
     }
 
-    // BG retreat check: if losing fight, drop target and disengage
-    if (me->GetMap()->IsBattlegroundOrArena() && ShouldBGRetreat(0))
+    // BG retreat check: if losing fight, drop target and move away
+    if (me->GetMap()->IsBattlegroundOrArena() && ShouldBGRetreat(lastdiff))
     {
         if (me->GetVictim())
             me->AttackStop();
         _lastTargetGuid = ObjectGuid::Empty;
+        // Move away from enemies — toward objective or ally cluster
+        if (!me->isMoving() && _bgHasObjective)
+        {
+            Position retreatPos = _bgObjectivePos;
+            BotMovement(BOT_MOVE_POINT, &retreatPos, nullptr, true);
+        }
         return false;
     }
 
@@ -16650,6 +16656,7 @@ void bot_ai::JustDied(Unit* u)
         _bgInterruptDelayTimer = 0;
         _bgInterruptTargetGuid.Clear();
         _bgFakeCastCooldown = 0;
+        _bgRetreatCooldown = 0;
 
         // Class matchup: they killed me
         if (u)
@@ -21896,11 +21903,14 @@ Unit* bot_ai::SelectBGHealTarget(std::list<Unit*> const& targets) const
     return bestTarget;
 }
 
-bool bot_ai::ShouldBGRetreat(uint32 /*diff*/)
+bool bot_ai::ShouldBGRetreat(uint32 diff)
 {
     Battleground* bg = GetBG();
     if (!bg || !me->GetMap()->IsBattlegroundOrArena())
         return false;
+
+    // Throttle: only check every 2 seconds (not every tick)
+    if (_bgRetreatCooldown > diff) { _bgRetreatCooldown -= diff; return false; }
 
     BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
 
@@ -21912,56 +21922,63 @@ bool bot_ai::ShouldBGRetreat(uint32 /*diff*/)
     if (IsFlagCarrier(me))
         return false;
 
+    // Defenders don't retreat from their assigned node — dying on the point is better
+    if (_bgAssignedRole == 2 && _bgHasObjective && me->GetExactDist2d(_bgObjectivePos) < 30.0f)
+        return false;
+
     float hpPct = GetHealthPCT(me);
 
-    // Count nearby allies vs enemies
+    // Count nearby allies vs enemies (single pass)
     uint8 nearAllies = 0, nearEnemies = 0;
+    bool healerNearby = false;
     TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    if (myTeamId != TEAM_ALLIANCE && myTeamId != TEAM_HORDE)
+        return false; // invalid team
     uint32 myTeamVal = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
     for (auto const& [guid, botData] : bg->GetBots())
     {
         Creature const* bot = ObjectAccessor::GetCreature(*me, guid);
         if (!bot || !bot->IsAlive() || me->GetExactDist2d(bot) > 30.0f) continue;
-        if (botData.Team == myTeamVal) ++nearAllies; else ++nearEnemies;
+        if (botData.Team == myTeamVal)
+        {
+            ++nearAllies;
+            if (bot != me && bot->GetBotAI() && bot->GetBotAI()->HasRole(BOT_ROLE_HEAL))
+                healerNearby = true;
+        }
+        else
+            ++nearEnemies;
     }
 
-    bool healerNearby = false;
-    for (auto const& [guid, botData] : bg->GetBots())
-    {
-        if (botData.Team != myTeamVal) continue;
-        Creature const* ally = ObjectAccessor::GetCreature(*me, guid);
-        if (!ally || !ally->IsAlive() || ally == me) continue;
-        if (ally->GetBotAI() && ally->GetBotAI()->HasRole(BOT_ROLE_HEAL) &&
-            me->GetExactDist2d(ally) < 30.0f)
-        { healerNearby = true; break; }
-    }
+    bool shouldRetreat = false;
 
-    // Retreat conditions (intelligence-gated):
     // 0.5-0.7: retreat when very low HP AND outnumbered
     if (p.intelligence < 0.7f)
-        return (hpPct < 20.0f && nearEnemies > nearAllies && !healerNearby);
-
-    // 0.7+: retreat when losing the fight (outnumbered, low HP, no healer)
-    bool losing = (nearEnemies >= nearAllies + 2) || // badly outnumbered
-                  (hpPct < 35.0f && nearEnemies > nearAllies) || // low HP and outnumbered
-                  (hpPct < 25.0f && !healerNearby); // very low, no healer
-
-    if (losing)
+        shouldRetreat = (hpPct < 20.0f && nearEnemies > nearAllies && !healerNearby);
+    else
     {
-        // Broadcast retreat to team
+        // 0.7+: retreat when losing the fight
+        shouldRetreat = (nearEnemies >= nearAllies + 2) || // badly outnumbered
+                        (hpPct < 30.0f && nearEnemies > nearAllies) || // low HP and outnumbered
+                        (hpPct < 20.0f && !healerNearby); // very low, no healer
+
+        // Follow team retreat: 3+ teammates retreating and we're wounded
+        if (!shouldRetreat)
+        {
+            uint8 retreaters = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_RETREAT);
+            if (retreaters >= 3 && hpPct < 40.0f)
+                shouldRetreat = true;
+        }
+    }
+
+    if (shouldRetreat)
+    {
         BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(), INTENT_RETREAT);
-        return true;
+        _bgRetreatCooldown = 5000; // don't re-check for 5 seconds
     }
+    else
+        _bgRetreatCooldown = 2000; // re-check in 2 seconds
 
-    // Also retreat if multiple teammates are already retreating
-    if (p.intelligence >= 0.7f)
-    {
-        uint8 retreaters = BotBGAIMgr::CountIntentions(bg->GetInstanceID(), myTeamId, INTENT_RETREAT);
-        if (retreaters >= 2 && hpPct < 50.0f)
-            return true; // team is pulling back, follow
-    }
-
-    return false;
+    return shouldRetreat;
 }
 
 float bot_ai::GetBGDefensiveUrgency() const
