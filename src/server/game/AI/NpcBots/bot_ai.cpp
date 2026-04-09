@@ -19573,11 +19573,11 @@ void bot_ai::Evade()
                         {
                             pos.m_positionZ = ground;
 
-                            // Steep upward slope rejection: if target is >5 yards above us
-                            // over a short horizontal distance, it's likely a cliff we can't walk up
+                            // Steep upward slope rejection: if target is >3 yards above us
+                            // at >40% grade, it's likely a cliff we can't walk up
                             float climbZ = pos.m_positionZ - me->GetPositionZ();
                             float hDist = me->GetExactDist2d(pos);
-                            bool tooSteep = (climbZ > 5.0f && hDist > 0.1f && climbZ / hDist > 0.6f);
+                            bool tooSteep = (climbZ > 3.0f && hDist > 0.1f && climbZ / hDist > 0.4f);
 
                             // LOS check
                             if (!tooSteep && me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
@@ -19609,7 +19609,7 @@ void bot_ai::Evade()
                                         if (wpZ <= INVALID_HEIGHT) continue;
                                         // Reject steep upward climbs
                                         float wpClimb = wpZ - me->GetPositionZ();
-                                        if (wpClimb > 5.0f && wpClimb / len > 0.6f) continue;
+                                        if (wpClimb > 3.0f && wpClimb / len > 0.4f) continue;
                                         if (!me->IsWithinLOS(wp.pos.GetPositionX(), wp.pos.GetPositionY(), wpZ + 2.0f,
                                             LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
                                             continue;
@@ -19641,7 +19641,11 @@ void bot_ai::Evade()
                                     if (groundRetry > INVALID_HEIGHT)
                                     {
                                         pos.m_positionZ = groundRetry;
-                                        if (me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
+                                        // Reject steep upward climbs
+                                        float retryClimb = pos.m_positionZ - me->GetPositionZ();
+                                        if (retryClimb > 3.0f && retryClimb / moveDist > 0.4f)
+                                            ; // too steep, don't use
+                                        else if (me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
                                             LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
                                             usedLearnedRoute = true;
                                     }
@@ -19731,7 +19735,43 @@ void bot_ai::Evade()
                         }
                     }
 
-                    // Always use MMAP pathed movement — it handles slopes and ramps naturally.
+                    // BG cliff climb prevention: check if the MMAP path goes uphill too steeply
+                    // at any point. Players can't run up WSG cliff faces, bots shouldn't either.
+                    // Downhill is always allowed (drops/jumps are fine).
+                    if (me->GetMap()->IsBattlegroundOrArena())
+                    {
+                        PathGenerator climbCheck(me);
+                        climbCheck.CalculatePath(pos.m_positionX, pos.m_positionY, pos.m_positionZ);
+                        bool pathTooSteep = false;
+
+                        if (climbCheck.GetPathType() & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE))
+                        {
+                            auto const& pathPoints = climbCheck.GetPath();
+                            for (size_t i = 1; i < pathPoints.size(); ++i)
+                            {
+                                float segClimb = pathPoints[i].z - pathPoints[i-1].z;
+                                if (segClimb <= 0.0f) continue; // downhill is fine
+                                float segDist = std::sqrt(
+                                    (pathPoints[i].x - pathPoints[i-1].x) * (pathPoints[i].x - pathPoints[i-1].x) +
+                                    (pathPoints[i].y - pathPoints[i-1].y) * (pathPoints[i].y - pathPoints[i-1].y));
+                                // Reject if any segment climbs >3yd uphill at >40% grade
+                                if (segClimb > 3.0f && segDist > 0.1f && segClimb / segDist > 0.4f)
+                                {
+                                    pathTooSteep = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (pathTooSteep)
+                        {
+                            // Path goes up a cliff — record wall hit and skip this movement
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), pos.m_positionX, pos.m_positionY);
+                            // Don't move — let next tick pick a different direction
+                            return;
+                        }
+                    }
+
                     // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
                     // AND MMAP can't find a walkable path down.
                     float zDiff = me->GetPositionZ() - pos.m_positionZ;
@@ -19739,7 +19779,6 @@ void bot_ai::Evade()
                     if (me->GetMap()->IsBattlegroundOrArena() && zDiff > 8.0f &&
                         dist2d < 6.0f && !JumpingOrFalling())
                     {
-                        // Verify MMAP can't handle this before jumping
                         PathGenerator path(me);
                         path.CalculatePath(pos.m_positionX, pos.m_positionY, pos.m_positionZ);
                         if (path.GetPathType() & (PATHFIND_NOPATH | PATHFIND_SHORT))
