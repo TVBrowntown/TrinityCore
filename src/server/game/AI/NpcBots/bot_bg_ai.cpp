@@ -632,9 +632,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
     float scatterDist = 5.0f + float(scatter % 1000) / 100.0f;
 
     // Momentum multipliers for attack vs defend preference
+    // Bigger bonuses when dominating — push the objective hard after wiping enemies
     float attackBias = 0.0f, defendBias = 0.0f;
-    if (momentum >= BG_MOMENTUM_DOMINATING) attackBias = 0.15f;
-    else if (momentum >= BG_MOMENTUM_ADVANTAGE) attackBias = 0.08f;
+    if (momentum >= BG_MOMENTUM_DOMINATING) attackBias = 0.30f;  // was 0.15
+    else if (momentum >= BG_MOMENTUM_ADVANTAGE) attackBias = 0.15f;  // was 0.08
     else if (momentum <= BG_MOMENTUM_WIPED) { defendBias = 0.15f; attackBias = -0.1f; }
     else if (momentum <= BG_MOMENTUM_OUTNUMBERED) { defendBias = 0.08f; attackBias = -0.05f; }
 
@@ -647,6 +648,14 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
     float hungerDefendPenalty = hunger * 0.25f;  // penalize defending when bored
 
     bool isOpeningRush = bg->GetStartTime() < 210000;
+
+    // Distance pull helper: sqrt curve gives stronger pull at close/mid range
+    // Linear: at 50% range = 0.5 pull. Sqrt: at 50% range = 0.71 pull
+    auto distancePull = [](float dist, float range) -> float {
+        if (dist >= range) return 0.0f;
+        float linear = 1.0f - dist / range;
+        return std::sqrt(linear);
+    };
 
     std::vector<BGUtilityResult> candidates;
 
@@ -693,7 +702,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             if (!weHaveTheirFlag) // flag is at base or on ground
             {
                 float dist = std::sqrt((enemyFlagX-myX)*(enemyFlagX-myX) + (enemyFlagY-myY)*(enemyFlagY-myY));
-                float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
+                float distFactor = distancePull(dist, 800.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
                 float score = (0.75f + attackBias + p.aggression * 0.15f + p.objectiveFocus * 0.1f)
                     * distFactor - stacking + hungerAttackBoost;
@@ -711,7 +720,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     fcPos.Relocate(enemyFC->GetPositionX(), enemyFC->GetPositionY(), enemyFC->GetPositionZ());
 
                 float dist = me->GetExactDist2d(fcPos);
-                float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
+                float distFactor = distancePull(dist, 800.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
                 float score = (0.85f + p.aggression * 0.1f) * distFactor - stacking + hungerAttackBoost;
                 addCandidate(BG_UTIL_CHASE_ENEMY_FC, score, fcPos, 1, INTENT_CHASE_FC);
@@ -726,7 +735,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     fcPos.Relocate(friendlyFC->GetPositionX(), friendlyFC->GetPositionY(), friendlyFC->GetPositionZ());
 
                 float dist = me->GetExactDist2d(fcPos);
-                float distFactor = std::max(0.0f, 1.0f - dist / 400.0f);
+                float distFactor = distancePull(dist, 400.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
                 float score = (0.55f + p.groupTendency * 0.15f + p.caution * 0.1f) * distFactor - stacking;
                 // More escorts needed if enemy has our flag too (both flags out)
@@ -752,7 +761,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                             flagPos.Relocate(droppedFlag->GetPositionX(), droppedFlag->GetPositionY(), droppedFlag->GetPositionZ());
 
                         float dist = me->GetExactDist2d(flagPos);
-                        float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                        float distFactor = distancePull(dist, 600.0f);
                         float score = 0.92f * distFactor; // very high — almost as urgent as FC delivering
                         addCandidate(BG_UTIL_RETURN_DROPPED_FLAG, score, flagPos, 1, INTENT_DEFEND_FLAG);
                     }
@@ -766,7 +775,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 if (friendlyFC2 && friendlyFC2->IsAlive() && friendlyFC2->IsInCombat())
                 {
                     float dist = me->GetExactDist2d(friendlyFC2);
-                    float distFactor = std::max(0.0f, 1.0f - dist / 300.0f);
+                    float distFactor = distancePull(dist, 300.0f);
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
                     float score = (0.80f + p.groupTendency * 0.1f) * distFactor - stacking;
                     addCandidate(BG_UTIL_PROTECT_FC, score,
@@ -790,8 +799,11 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             {
                 float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f + hungerFightBoost;
                 if (isOpeningRush) score += 0.15f;
-                // Hard cap below the lowest objective base score to ensure objectives always win
-                score = std::min(score, 0.65f);
+                // When team is winning, midfield fighting is even less valuable — push the flag
+                float midCap = (momentum >= BG_MOMENTUM_DOMINATING) ? 0.40f
+                             : (momentum >= BG_MOMENTUM_ADVANTAGE) ? 0.55f
+                             : 0.65f;
+                score = std::min(score, midCap);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(MID_X, MID_Y, MID_Z), 1, INTENT_ROAM);
             }
@@ -816,7 +828,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 float nodeY = BG_AB_NodePositions[n].GetPositionY();
                 float nodeZ = BG_AB_NodePositions[n].GetPositionZ();
                 float dist = std::sqrt((nodeX-myX)*(nodeX-myX) + (nodeY-myY)*(nodeY-myY));
-                float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                float distFactor = distancePull(dist, 600.0f);
 
                 bool ours = ab->IsNodeOccupied(n, myTeamId);
                 bool theirs = ab->IsNodeOccupied(n, enemyTeamId);
@@ -905,7 +917,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             // FIGHT MIDFIELD (roaming) — capped below lowest objective base
             {
                 float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
-                score = std::min(score, 0.55f);
+                float midCap = (momentum >= BG_MOMENTUM_DOMINATING) ? 0.30f
+                             : (momentum >= BG_MOMENTUM_ADVANTAGE) ? 0.45f
+                             : 0.55f;
+                score = std::min(score, midCap);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(1185.0f, 1184.0f, -56.0f), 1, INTENT_ROAM); // AB center
             }
@@ -955,7 +970,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             {
                 static constexpr float EY_FLAG_X = 2174.78f, EY_FLAG_Y = 1569.0f, EY_FLAG_Z = 1160.0f;
                 float dist = std::sqrt((EY_FLAG_X-myX)*(EY_FLAG_X-myX) + (EY_FLAG_Y-myY)*(EY_FLAG_Y-myY));
-                float distFactor = std::max(0.0f, 1.0f - dist / 500.0f);
+                float distFactor = distancePull(dist, 500.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
                 float score = (0.65f + p.objectiveFocus * 0.15f) * distFactor - stacking;
                 if (pointsHeld > 0) score += 0.1f; // flag is worth more if we have points to cap at
@@ -971,7 +986,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 if (fc && fc->IsAlive() && bg->GetBotTeamId(fc->GetGUID()) == myTeamId)
                 {
                     float dist = me->GetExactDist2d(fc);
-                    float distFactor = std::max(0.0f, 1.0f - dist / 400.0f);
+                    float distFactor = distancePull(dist, 400.0f);
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
                     float score = (0.5f + p.groupTendency * 0.15f) * distFactor - stacking;
                     addCandidate(BG_UTIL_ESCORT_FRIENDLY_FC, score,
@@ -987,7 +1002,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 if (enemyFC && enemyFC->IsAlive() && bg->GetBotTeamId(enemyFC->GetGUID()) != myTeamId)
                 {
                     float dist = me->GetExactDist2d(enemyFC);
-                    float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                    float distFactor = distancePull(dist, 600.0f);
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
                     float score = (0.78f + p.aggression * 0.1f) * distFactor - stacking;
                     addCandidate(BG_UTIL_CHASE_NEUTRAL_FC, score,
@@ -1004,7 +1019,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 float ptY = BG_EY_TriggerPositions[pt].GetPositionY();
                 float ptZ = BG_EY_TriggerPositions[pt].GetPositionZ();
                 float dist = std::sqrt((ptX-myX)*(ptX-myX) + (ptY-myY)*(ptY-myY));
-                float distFactor = std::max(0.0f, 1.0f - dist / 600.0f);
+                float distFactor = distancePull(dist, 600.0f);
 
                 TeamId owner = ey->GetPointOwner(pt);
                 bool ours = (owner == myTeamId);
@@ -1083,7 +1098,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             // Fight midfield — capped below lowest objective base
             {
                 float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
-                score = std::min(score, 0.55f);
+                float midCap = (momentum >= BG_MOMENTUM_DOMINATING) ? 0.30f
+                             : (momentum >= BG_MOMENTUM_ADVANTAGE) ? 0.45f
+                             : 0.55f;
+                score = std::min(score, midCap);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(2174.0f, 1569.0f, 1160.0f), 1, INTENT_ROAM);
             }
