@@ -16655,6 +16655,9 @@ void bot_ai::JustDied(Unit* u)
         _bgRetreatCooldown = 0;
         _bgCurrentIntent = 0xFF;
         _bgCurrentTargetNode = 0xFF;
+        _bgPathHistoryHead = 0;
+        _bgPathHistoryCount = 0;
+        _bgPathRecordTimer = 0;
 
         // Class matchup: they killed me
         if (u)
@@ -19222,6 +19225,26 @@ void bot_ai::CommonTimers(uint32 diff)
             _bgCombatHunger = std::min(1.0f, _bgCombatHunger + growth);
         }
 
+        // Path history: record recent positions for retroactive penalization
+        // If a bot clips into geometry, we can penalize the whole approach path
+        if (IsWanderer() && me->GetMap()->IsBattlegroundOrArena())
+        {
+            if (_bgPathRecordTimer > diff) _bgPathRecordTimer -= diff;
+            else
+            {
+                _bgPathRecordTimer = 1500; // record every 1.5s
+
+                // Only record if bot actually moved since last record
+                if (_bgPathHistoryCount == 0 ||
+                    me->GetExactDist2d(_bgPathHistory[(_bgPathHistoryHead + BG_PATH_HISTORY_SIZE - 1) % BG_PATH_HISTORY_SIZE]) > 5.0f)
+                {
+                    _bgPathHistory[_bgPathHistoryHead].Relocate(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+                    _bgPathHistoryHead = (_bgPathHistoryHead + 1) % BG_PATH_HISTORY_SIZE;
+                    if (_bgPathHistoryCount < BG_PATH_HISTORY_SIZE) ++_bgPathHistoryCount;
+                }
+            }
+        }
+
         // Z clip recovery: detect when bot has fallen through terrain / clipped into geometry
         // Some M2 doodads (like WSG spikes) can displace bots to invalid positions where they
         // exist at the wrong Z, damage players through walls, and become visually invisible.
@@ -19283,6 +19306,26 @@ void bot_ai::CommonTimers(uint32 diff)
                             BotBGAIMgr::RecordWallHit(me->GetMapId(), curX, curY - 3.0f);
                         }
 
+                        // Path penalization: apply decaying wall hits along the approach path
+                        // The closer to the clip point, the heavier the penalty.
+                        // This teaches future bots to avoid not just the clip point but
+                        // the entire corridor leading to it.
+                        uint32 mapId = me->GetMapId();
+                        for (uint8 i = 0; i < _bgPathHistoryCount; ++i)
+                        {
+                            // Walk backward from most recent (closest to clip) to oldest
+                            uint8 idx = (_bgPathHistoryHead + BG_PATH_HISTORY_SIZE - 1 - i) % BG_PATH_HISTORY_SIZE;
+                            Position const& p = _bgPathHistory[idx];
+                            // Decay: most recent gets 4 hits, then 3, 2, 1, then 0 (stop)
+                            uint8 hitCount = (i < 4) ? (4 - i) : 0;
+                            if (hitCount == 0) break;
+                            for (uint8 h = 0; h < hitCount; ++h)
+                                BotBGAIMgr::RecordWallHit(mapId, p.GetPositionX(), p.GetPositionY());
+                        }
+                        // Clear path history to prevent re-penalizing after recovery
+                        _bgPathHistoryCount = 0;
+                        _bgPathHistoryHead = 0;
+
                         _bgHasObjective = false;
                         _bgNeedsReassessment = true;
                         _bgReactionDelay = 0;
@@ -19326,15 +19369,31 @@ void bot_ai::CommonTimers(uint32 diff)
                 _bgStuckTimer += diff;
                 if (_bgStuckTimer >= 2000) // 2 seconds of being stuck
                 {
+                    uint32 mapId = me->GetMapId();
+                    float sx = me->GetPositionX(), sy = me->GetPositionY();
                     // Record multiple wall hits at this position to strongly bias wall avoidance
                     // Phantom obstacles need heavy weighting since LOS can't detect them
                     for (int i = 0; i < 5; ++i)
-                        BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY());
+                        BotBGAIMgr::RecordWallHit(mapId, sx, sy);
                     // Also record at slight offsets to widen the avoidance zone
-                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX() + 2.0f, me->GetPositionY());
-                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX() - 2.0f, me->GetPositionY());
-                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY() + 2.0f);
-                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY() - 2.0f);
+                    BotBGAIMgr::RecordWallHit(mapId, sx + 2.0f, sy);
+                    BotBGAIMgr::RecordWallHit(mapId, sx - 2.0f, sy);
+                    BotBGAIMgr::RecordWallHit(mapId, sx, sy + 2.0f);
+                    BotBGAIMgr::RecordWallHit(mapId, sx, sy - 2.0f);
+
+                    // Path penalization: apply decaying wall hits along the approach path
+                    // Teaches future bots to avoid the corridor leading to this stuck spot
+                    for (uint8 i = 0; i < _bgPathHistoryCount; ++i)
+                    {
+                        uint8 idx = (_bgPathHistoryHead + BG_PATH_HISTORY_SIZE - 1 - i) % BG_PATH_HISTORY_SIZE;
+                        Position const& p = _bgPathHistory[idx];
+                        uint8 hitCount = (i < 4) ? (4 - i) : 0;
+                        if (hitCount == 0) break;
+                        for (uint8 h = 0; h < hitCount; ++h)
+                            BotBGAIMgr::RecordWallHit(mapId, p.GetPositionX(), p.GetPositionY());
+                    }
+                    _bgPathHistoryCount = 0;
+                    _bgPathHistoryHead = 0;
 
                     // Force bot to abandon current path
                     me->GetMotionMaster()->Clear();

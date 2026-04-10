@@ -835,6 +835,12 @@ private:
     uint32 _bgStuckTimer{};             // time since last position change
     Position _bgLastValidPos{};         // last known-good position for clip recovery
     uint32 _bgClipCheckTimer{};         // throttle for Z sanity check
+    // Path history: ring buffer of recent positions for retroactive wall-hit penalization
+    static constexpr uint8 BG_PATH_HISTORY_SIZE = 16;
+    Position _bgPathHistory[BG_PATH_HISTORY_SIZE]{};
+    uint8 _bgPathHistoryHead{0};        // next slot to write
+    uint8 _bgPathHistoryCount{0};       // how many valid entries (up to SIZE)
+    uint32 _bgPathRecordTimer{};        // throttle path recording
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
