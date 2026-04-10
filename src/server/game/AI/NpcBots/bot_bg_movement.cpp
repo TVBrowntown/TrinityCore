@@ -525,6 +525,8 @@ void bot_ai::OnBotEnterBattleground()
     _bgRetreatCooldown = 0;
     _bgCurrentIntent = 0xFF;
     _bgCurrentTargetNode = 0xFF;
+    _bgLastStuckPos.Relocate(0.0f, 0.0f, 0.0f);
+    _bgStuckTimer = 0;
     // Combat hunger: high initial value pulls bots out of spawn at start
     _bgCombatHunger = 0.7f;
     {

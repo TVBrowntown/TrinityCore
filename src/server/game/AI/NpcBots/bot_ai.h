@@ -831,6 +831,8 @@ private:
     float _bgCombatHungerRate{1.0f};    // per-bot growth multiplier (0.5-0.75 for defensive bots)
     uint8 _bgCurrentIntent{0xFF};       // current INTENT_* the bot is acting on (for stale check)
     uint8 _bgCurrentTargetNode{0xFF};   // node index for AB/EY intents
+    Position _bgLastStuckPos{};         // last position checked for stuck detection
+    uint32 _bgStuckTimer{};             // time since last position change
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};

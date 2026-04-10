@@ -4852,18 +4852,14 @@ bool bot_ai::CheckAttackTarget()
             return false;
     }
 
-    // BG retreat check: if losing fight, drop target and move away
+    // BG retreat check: if losing fight, drop target and stop moving
+    // (next Evade tick will path the bot toward objective with full LOS validation)
     if (me->GetMap()->IsBattlegroundOrArena() && ShouldBGRetreat(lastdiff))
     {
         if (me->GetVictim())
             me->AttackStop();
         _lastTargetGuid = ObjectGuid::Empty;
-        // Move away from enemies — toward objective or ally cluster
-        if (!me->isMoving() && _bgHasObjective)
-        {
-            Position retreatPos = _bgObjectivePos;
-            BotMovement(BOT_MOVE_POINT, &retreatPos, nullptr, true);
-        }
+        // Don't issue movement here — let Evade() handle pathing with full LOS checks
         return false;
     }
 
@@ -19226,6 +19222,49 @@ void bot_ai::CommonTimers(uint32 diff)
             _bgCombatHunger = std::min(1.0f, _bgCombatHunger + growth);
         }
 
+        // Stuck detection: detect phantom obstacles (M2 doodads with collision but no LOS)
+        // If the bot has a movement target but isn't actually moving, record heavy wall hits
+        if (IsWanderer() && me->isMoving() && _bgHasObjective)
+        {
+            float distMoved = me->GetExactDist2d(_bgLastStuckPos);
+            if (distMoved < 1.0f)
+            {
+                // Bot hasn't moved meaningfully — accumulate stuck time
+                _bgStuckTimer += diff;
+                if (_bgStuckTimer >= 2000) // 2 seconds of being stuck
+                {
+                    // Record multiple wall hits at this position to strongly bias wall avoidance
+                    // Phantom obstacles need heavy weighting since LOS can't detect them
+                    for (int i = 0; i < 5; ++i)
+                        BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY());
+                    // Also record at slight offsets to widen the avoidance zone
+                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX() + 2.0f, me->GetPositionY());
+                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX() - 2.0f, me->GetPositionY());
+                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY() + 2.0f);
+                    BotBGAIMgr::RecordWallHit(me->GetMapId(), me->GetPositionX(), me->GetPositionY() - 2.0f);
+
+                    // Force bot to abandon current path
+                    me->GetMotionMaster()->Clear();
+                    me->StopMoving();
+                    _bgHasObjective = false;
+                    _bgStuckTimer = 0;
+                    _bgReactionDelay = 0; // re-evaluate immediately
+                }
+            }
+            else
+            {
+                // Bot moved — reset stuck timer
+                _bgStuckTimer = 0;
+                _bgLastStuckPos.Relocate(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+            }
+        }
+        else if (!me->isMoving())
+        {
+            // Not trying to move — keep tracking position for next stuck check
+            _bgStuckTimer = 0;
+            _bgLastStuckPos.Relocate(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+        }
+
         // Mid-match strategy revision: every 60s, check if current strategy is failing
         if (_bgStrategyRevisionTimer <= diff)
         {
@@ -19839,9 +19878,9 @@ void bot_ai::Evade()
                         }
                     }
 
-                    // FINAL LOS validation: check destination AND midpoint at multiple heights
-                    // Catches obstacles missed by MMAP (tree stumps, low rocks, props) and
-                    // any case where the destination ended up at a bad Z after fallbacks
+                    // FINAL PATH validation: validate the actual MMAP path that will be walked
+                    // Catches obstacles missed by MMAP navmesh (spikes, stumps, low rocks, props)
+                    // by checking LOS at every node along the generated path
                     if (me->GetMap()->IsBattlegroundOrArena() && !JumpingOrFalling())
                     {
                         // Re-validate ground Z one more time — defends against stale positions
@@ -19849,30 +19888,55 @@ void bot_ai::Evade()
                         me->UpdateGroundPositionZ(pos.m_positionX, pos.m_positionY, finalGround);
                         if (finalGround <= INVALID_HEIGHT)
                         {
-                            // Bad ground — record wall hit and skip
                             BotBGAIMgr::RecordWallHit(me->GetMapId(), pos.m_positionX, pos.m_positionY);
                             return;
                         }
                         pos.m_positionZ = finalGround;
 
-                        // Multi-height LOS: check at chest (2.0) AND ankle (0.5) heights
-                        // Chest catches walls and tall obstacles, ankle catches stumps and low props
-                        bool losChest = me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
-                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
-                        bool losAnkle = me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 0.5f,
-                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+                        // Generate the actual MMAP path the bot will walk
+                        PathGenerator pathCheck(me);
+                        pathCheck.CalculatePath(pos.m_positionX, pos.m_positionY, pos.m_positionZ);
 
-                        // Also check midpoint to catch obstacles between us and destination
-                        float midX = (me->GetPositionX() + pos.m_positionX) * 0.5f;
-                        float midY = (me->GetPositionY() + pos.m_positionY) * 0.5f;
-                        float midZ = (me->GetPositionZ() + pos.m_positionZ) * 0.5f;
-                        bool losMid = me->IsWithinLOS(midX, midY, midZ + 1.0f,
-                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
-
-                        if (!losChest || !losAnkle || !losMid)
+                        bool pathBlocked = false;
+                        if (pathCheck.GetPathType() & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE))
                         {
-                            // Path blocked — record wall hit and skip movement this tick
-                            // Next tick will pick a new PF direction (wall avoidance force kicks in)
+                            auto const& pathPoints = pathCheck.GetPath();
+
+                            // Check LOS between every consecutive pair of path nodes at chest + ankle heights
+                            // This catches obstacles MMAP routed through (spikes, stumps, props missing from navmesh)
+                            for (size_t i = 1; i < pathPoints.size(); ++i)
+                            {
+                                float fromX = pathPoints[i-1].x, fromY = pathPoints[i-1].y, fromZ = pathPoints[i-1].z;
+                                float toX = pathPoints[i].x, toY = pathPoints[i].y, toZ = pathPoints[i].z;
+
+                                // Check chest-height LOS
+                                if (!me->GetMap()->isInLineOfSight(
+                                    fromX, fromY, fromZ + 2.0f,
+                                    toX, toY, toZ + 2.0f,
+                                    me->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
+                                {
+                                    pathBlocked = true;
+                                    break;
+                                }
+                                // Check ankle-height LOS (catches spikes, stumps, low props)
+                                if (!me->GetMap()->isInLineOfSight(
+                                    fromX, fromY, fromZ + 0.5f,
+                                    toX, toY, toZ + 0.5f,
+                                    me->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing))
+                                {
+                                    pathBlocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // No valid MMAP path at all
+                            pathBlocked = true;
+                        }
+
+                        if (pathBlocked)
+                        {
                             BotBGAIMgr::RecordWallHit(me->GetMapId(), pos.m_positionX, pos.m_positionY);
                             return;
                         }
