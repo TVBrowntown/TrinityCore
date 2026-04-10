@@ -532,6 +532,8 @@ void bot_ai::OnBotEnterBattleground()
     _bgPathHistoryHead = 0;
     _bgPathHistoryCount = 0;
     _bgPathRecordTimer = 0;
+    _bgBypassCommitTimer = 0;
+    _bgBypassStep = 0;
     // Combat hunger: high initial value pulls bots out of spawn at start
     _bgCombatHunger = 0.7f;
     {

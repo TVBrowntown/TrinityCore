@@ -841,6 +841,10 @@ private:
     uint8 _bgPathHistoryHead{0};        // next slot to write
     uint8 _bgPathHistoryCount{0};       // how many valid entries (up to SIZE)
     uint32 _bgPathRecordTimer{};        // throttle path recording
+    // Bypass: committed sub-goal route around an obstacle
+    uint32 _bgBypassCommitTimer{};      // time remaining on bypass commitment
+    uint8 _bgBypassStep{0};             // current step in bypass sequence (0=none)
+    Position _bgBypassTargets[3]{};     // up to 3 bypass waypoints
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
