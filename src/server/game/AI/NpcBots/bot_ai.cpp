@@ -19280,6 +19280,57 @@ void bot_ai::CommonTimers(uint32 diff)
                 if (curZ < -100.0f)
                     clipped = true;
 
+                // Case 4: Ceiling check — is there static geometry directly above the bot?
+                // If something's 5-30 yards overhead AND we're not in a known indoor area,
+                // we're clipped under a floor/building
+                if (!clipped && !me->IsInWater())
+                {
+                    float ceilHeight = me->GetMap()->GetHeight(me->GetPhaseMask(), curX, curY, curZ + 5.0f, true, 50.0f);
+                    // GetHeight with a start Z above us searches for walkable Z. If it finds one
+                    // significantly higher AND it's a reasonable "floor above us" height (5-40yd),
+                    // we're under geometry.
+                    if (ceilHeight > INVALID_HEIGHT && ceilHeight > curZ + 5.0f && ceilHeight < curZ + 40.0f)
+                    {
+                        // There's a walkable surface between 5-40yd above us
+                        // Bot might legitimately be under a roof — check if they're way below
+                        // the elevation of nearby combatants to distinguish
+                        if (Battleground* bgCheck = GetBG())
+                        {
+                            float avgEnemyZ = 0.0f;
+                            uint32 enemyCount = 0;
+                            TeamId myTId = bgCheck->GetBotTeamId(me->GetGUID());
+                            uint32 myTV = myTId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+                            for (auto const& [guid, botData] : bgCheck->GetBots())
+                            {
+                                if (botData.Team == myTV) continue;
+                                Creature const* enemy = ObjectAccessor::GetCreature(*me, guid);
+                                if (!enemy || !enemy->IsAlive()) continue;
+                                if (me->GetExactDist2d(enemy) > 40.0f) continue;
+                                avgEnemyZ += enemy->GetPositionZ();
+                                ++enemyCount;
+                            }
+                            if (enemyCount > 0)
+                            {
+                                avgEnemyZ /= float(enemyCount);
+                                // If nearby enemies are >10yd above us, we've clipped below them
+                                if (avgEnemyZ - curZ > 10.0f)
+                                    clipped = true;
+                            }
+                        }
+                    }
+                }
+
+                // Case 5: XY proximity to enemies but dramatic Z mismatch (attacking through wall)
+                if (!clipped && me->IsInCombat() && me->GetVictim())
+                {
+                    Unit* victim = me->GetVictim();
+                    float zDiff = std::abs(me->GetPositionZ() - victim->GetPositionZ());
+                    float xyDist = me->GetExactDist2d(victim);
+                    // Close in XY (<15yd) but >10yd Z difference = shooting through floor/wall
+                    if (xyDist < 15.0f && zDiff > 10.0f)
+                        clipped = true;
+                }
+
                 if (clipped)
                 {
                     // Recover: teleport to last known-good position
