@@ -19672,6 +19672,66 @@ void bot_ai::Evade()
                             me->GetPositionY() + blendedDirY * moveDist,
                             me->GetPositionZ());
 
+                        // WAYPOINT SNAP: replace raw PF target with a nearby learned waypoint
+                        // if one exists along the same direction. Uses accumulated travel data
+                        // to prefer validated-walkable paths, with randomness to prevent
+                        // single-file conga lines.
+                        // SKIP when close to objective — tactical positioning matters more than paths.
+                        float distToObjective = _bgHasObjective ? me->GetExactDist2d(_bgObjectivePos) : 9999.0f;
+                        if (distToObjective > 30.0f && BotBGAIMgr::HasLearnedWaypoints(me->GetMapId()))
+                        {
+                            auto snapCandidates = BotBGAIMgr::GetLearnedWaypointsNear(
+                                me->GetMapId(), pos.m_positionX, pos.m_positionY, 15.0f);
+
+                            // Score candidates: visit count (with wall penalty) × direction alignment
+                            struct SnapCand { Position pos; float score; };
+                            std::vector<SnapCand> scored;
+                            for (auto const& wp : snapCandidates)
+                            {
+                                if (wp.visitCount < 3) continue;
+                                float wdx = wp.pos.GetPositionX() - me->GetPositionX();
+                                float wdy = wp.pos.GetPositionY() - me->GetPositionY();
+                                float wlen = std::sqrt(wdx * wdx + wdy * wdy);
+                                if (wlen < 5.0f) continue; // too close
+                                // Must be roughly in PF direction
+                                float alignment = (wdx / wlen) * blendedDirX + (wdy / wlen) * blendedDirY;
+                                if (alignment < 0.5f) continue; // not forward enough
+                                float wallPenalty = (wp.wallHits > 0) ? 1.0f / (1.0f + float(wp.wallHits) * 0.5f) : 1.0f;
+                                float score = std::log(float(wp.visitCount) + 1.0f) * alignment * wallPenalty;
+                                scored.push_back(SnapCand{ wp.pos, score });
+                            }
+
+                            if (!scored.empty())
+                            {
+                                // Sort by score descending, keep top 5
+                                std::sort(scored.begin(), scored.end(),
+                                    [](SnapCand const& a, SnapCand const& b) { return a.score > b.score; });
+                                if (scored.size() > 5) scored.resize(5);
+
+                                // Weighted random selection among top candidates
+                                // (prevents single-file path ossification)
+                                float totalWeight = 0.0f;
+                                for (auto const& c : scored) totalWeight += c.score;
+                                if (totalWeight > 0.0f)
+                                {
+                                    float roll = frand(0.0f, totalWeight);
+                                    float cumulative = 0.0f;
+                                    for (auto const& c : scored)
+                                    {
+                                        cumulative += c.score;
+                                        if (roll <= cumulative)
+                                        {
+                                            float snapZ = c.pos.GetPositionZ();
+                                            me->UpdateGroundPositionZ(c.pos.GetPositionX(), c.pos.GetPositionY(), snapZ);
+                                            if (snapZ > INVALID_HEIGHT)
+                                                pos.Relocate(c.pos.GetPositionX(), c.pos.GetPositionY(), snapZ);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Ground height validation
                         float ground = pos.m_positionZ;
                         me->UpdateGroundPositionZ(pos.m_positionX, pos.m_positionY, ground);
