@@ -19824,26 +19824,8 @@ void bot_ai::Evade()
 
                     // Visual authenticity: rare random hop while moving (not in combat)
                     // Players hop occasionally while running across the map
-                    if (me->GetMap()->IsBattlegroundOrArena() && !me->IsInCombat() &&
-                        !JumpingOrFalling() && urand(1, 100) <= 4) // ~4% chance per movement tick
-                    {
-                        // Small forward hop (3-4 yards) — not a full jump to destination
-                        float hopDist = frand(3.0f, 4.0f);
-                        float orient = me->GetOrientation();
-                        Position hopPos;
-                        hopPos.Relocate(
-                            me->GetPositionX() + std::cos(orient) * hopDist,
-                            me->GetPositionY() + std::sin(orient) * hopDist,
-                            me->GetPositionZ());
-                        float hopGround = hopPos.m_positionZ;
-                        me->UpdateGroundPositionZ(hopPos.m_positionX, hopPos.m_positionY, hopGround);
-                        if (hopGround > INVALID_HEIGHT)
-                        {
-                            hopPos.m_positionZ = hopGround;
-                            BotMovement(BOT_MOVE_JUMP, &hopPos, nullptr, false);
-                        }
-                        // Don't return — still issue normal movement command after the hop
-                    }
+                    // DISABLED: causes Z desync when followed by a point movement command
+                    // (bots clip through ground because the jump arc gets interrupted)
 
                     // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
                     // AND MMAP can't find a walkable path down.

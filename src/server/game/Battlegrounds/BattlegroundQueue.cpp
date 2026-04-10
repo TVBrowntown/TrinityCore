@@ -771,6 +771,9 @@ bool BattlegroundQueue::CheckPremadeMatch(BattlegroundBracketId bracket_id, uint
 // this method tries to create battleground or arena with MinPlayersPerTeam against MinPlayersPerTeam
 bool BattlegroundQueue::CheckNormalMatch(Battleground* bg_template, BattlegroundBracketId bracket_id, uint32 minPlayers, uint32 maxPlayers)
 {
+    // npcbot: fill pools up to maxPlayers (not just min) so bot-populated BGs use full capacity
+    // The final return at the bottom of this function still enforces the minPlayers check,
+    // so this only changes how MANY players are pulled from the queue, not whether the BG starts
     GroupsQueueType::const_iterator itr_team[PVP_TEAMS_COUNT];
     for (uint32 i = 0; i < PVP_TEAMS_COUNT; i++)
     {
@@ -780,7 +783,7 @@ bool BattlegroundQueue::CheckNormalMatch(Battleground* bg_template, Battleground
             if (!(*(itr_team[i]))->IsInvitedToBGInstanceGUID)
             {
                 m_SelectionPools[i].AddGroup(*(itr_team[i]), maxPlayers);
-                if (m_SelectionPools[i].GetPlayerCount() >= minPlayers)
+                if (m_SelectionPools[i].GetPlayerCount() >= maxPlayers)
                     break;
             }
         }
