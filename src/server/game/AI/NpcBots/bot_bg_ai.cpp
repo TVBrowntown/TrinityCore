@@ -638,6 +638,13 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
     else if (momentum <= BG_MOMENTUM_WIPED) { defendBias = 0.15f; attackBias = -0.1f; }
     else if (momentum <= BG_MOMENTUM_OUTNUMBERED) { defendBias = 0.08f; attackBias = -0.05f; }
 
+    // Combat hunger: builds when bot hasn't fought in a while, boosts combat-seeking actions
+    // Pulls bots out of base when they're doing laps without engaging
+    float hunger = me->GetBotAI() ? me->GetBotAI()->GetBGCombatHunger() : 0.0f;
+    float hungerAttackBoost = hunger * 0.3f;     // boost attack actions
+    float hungerFightBoost = hunger * 0.5f;      // boost midfield fighting most
+    float hungerDefendPenalty = hunger * 0.25f;  // penalize defending when bored
+
     bool isOpeningRush = bg->GetStartTime() < 210000;
 
     std::vector<BGUtilityResult> candidates;
@@ -688,7 +695,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
                 float score = (0.75f + attackBias + p.aggression * 0.15f + p.objectiveFocus * 0.1f)
-                    * distFactor - stacking;
+                    * distFactor - stacking + hungerAttackBoost;
                 if (isOpeningRush) score += 0.1f;
                 addCandidate(BG_UTIL_GRAB_ENEMY_FLAG, score,
                     Position(enemyFlagX, enemyFlagY, enemyFlagZ), 1, INTENT_ATTACK_FLAG);
@@ -705,7 +712,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 float dist = me->GetExactDist2d(fcPos);
                 float distFactor = std::max(0.0f, 1.0f - dist / 800.0f);
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
-                float score = (0.85f + p.aggression * 0.1f) * distFactor - stacking;
+                float score = (0.85f + p.aggression * 0.1f) * distFactor - stacking + hungerAttackBoost;
                 addCandidate(BG_UTIL_CHASE_ENEMY_FC, score, fcPos, 1, INTENT_CHASE_FC);
             }
 
@@ -771,7 +778,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             if (!enemyHasOurFlag)
             {
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_FLAG) * 0.15f;
-                float score = 0.45f + defendBias + p.caution * 0.2f + p.objectiveFocus * 0.1f - stacking;
+                float score = 0.45f + defendBias + p.caution * 0.2f + p.objectiveFocus * 0.1f - stacking - hungerDefendPenalty;
                 // If we have their flag, defending ours is more important (need both for cap)
                 if (weHaveTheirFlag) score += 0.25f;
                 addCandidate(BG_UTIL_DEFEND_OWN_FLAG, score,
@@ -780,7 +787,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
             // --- FIGHT MIDFIELD (always available, low priority) ---
             {
-                float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f;
+                float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f + hungerFightBoost;
                 if (isOpeningRush) score += 0.15f;
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(MID_X, MID_Y, MID_Z), 1, INTENT_ROAM);
@@ -819,7 +826,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     float stacking = alliesHeading * 0.12f;
                     float base = theirs ? 0.6f : 0.7f; // neutral > enemy (easier to cap)
                     float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
-                        * distFactor - stacking;
+                        * distFactor - stacking + hungerAttackBoost;
                     if (isOpeningRush) score += 0.1f;
                     // Coordinated engage: smart bots prefer nodes where allies are also heading
                     // Penalize going alone against enemy-held nodes (need backup)
@@ -840,7 +847,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     // DEFEND NODE
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, n) * 0.15f;
                     float base = 0.4f;
-                    float score = (base + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    float score = (base + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking - hungerDefendPenalty;
                     // If barely holding 3, defense is more important
                     if (nodesHeld <= 3) score += 0.12f;
                     // Enemy concentration detection: boost defense if enemies pushing this node
@@ -894,7 +901,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
             // FIGHT MIDFIELD (roaming)
             {
-                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f;
+                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(1185.0f, 1184.0f, -56.0f), 1, INTENT_ROAM); // AB center
             }
@@ -1004,7 +1011,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     float stacking = alliesHeading * 0.12f;
                     float base = (owner == TEAM_NEUTRAL) ? 0.65f : 0.55f;
                     float score = (base + attackBias + strategicNeed + p.aggression * 0.12f)
-                        * distFactor - stacking;
+                        * distFactor - stacking + hungerAttackBoost;
                     // Coordinated engage: don't attack enemy-held point alone
                     if (owner != TEAM_NEUTRAL && p.intelligence >= 0.5f)
                     {
@@ -1020,7 +1027,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 else
                 {
                     float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_NODE, pt) * 0.15f;
-                    float score = (0.4f + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    float score = (0.4f + defendBias + p.caution * 0.15f + p.groupTendency * 0.1f) * distFactor - stacking - hungerDefendPenalty;
                     if (pointsHeld <= 2) score += 0.12f;
                     // Enemy concentration: boost defense if enemies pushing this point
                     if (p.intelligence >= 0.5f)
@@ -1071,7 +1078,7 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
             // Fight midfield
             {
-                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f;
+                float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(2174.0f, 1569.0f, 1160.0f), 1, INTENT_ROAM);
             }

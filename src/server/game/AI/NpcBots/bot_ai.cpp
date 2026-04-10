@@ -19209,6 +19209,21 @@ void bot_ai::CommonTimers(uint32 diff)
         if (_bgKiteTimer > diff) _bgKiteTimer -= diff; else _bgKiteTimer = 0;
         if (_bgStrafeTimer > diff) _bgStrafeTimer -= diff; else _bgStrafeTimer = 0;
 
+        // Combat hunger: builds out of combat, decays in combat
+        // Pulls bored bots toward fights instead of doing laps in base
+        if (me->IsInCombat())
+        {
+            // In combat: hunger drops to 0 in ~2 seconds
+            float decay = 0.0005f * float(diff);
+            _bgCombatHunger = std::max(0.0f, _bgCombatHunger - decay);
+        }
+        else
+        {
+            // Out of combat: hunger builds to 1.0 in ~30 seconds (slower for defensive bots)
+            float growth = 0.000033f * float(diff) * _bgCombatHungerRate;
+            _bgCombatHunger = std::min(1.0f, _bgCombatHunger + growth);
+        }
+
         // Mid-match strategy revision: every 60s, check if current strategy is failing
         if (_bgStrategyRevisionTimer <= diff)
         {

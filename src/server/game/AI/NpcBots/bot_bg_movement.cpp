@@ -523,6 +523,16 @@ void bot_ai::OnBotEnterBattleground()
     _bgInterruptTargetGuid.Clear();
     _bgFakeCastCooldown = 0;
     _bgRetreatCooldown = 0;
+    // Combat hunger: high initial value pulls bots out of spawn at start
+    _bgCombatHunger = 0.7f;
+    {
+        // Defensive bots build hunger slower (random 0.5-0.75x)
+        BotBGPersonality p = BotBGAIMgr::ComputePersonality(me->GetEntry());
+        if (p.caution > 0.5f)
+            _bgCombatHungerRate = frand(0.5f, 0.75f);
+        else
+            _bgCombatHungerRate = 1.0f;
+    }
     _bgStrategyRevisionTimer = 60000;
     _bgStratKills = 0;
     _bgStratDeaths = 0;

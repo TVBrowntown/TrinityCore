@@ -242,6 +242,8 @@ public:
     float GetBGDefensiveUrgency() const;
     // BG disengage: should this bot break off combat and retreat?
     bool ShouldBGRetreat(uint32 diff);
+    // Combat hunger getter (0-1, builds out of combat)
+    float GetBGCombatHunger() const { return _bgCombatHunger; }
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
@@ -825,6 +827,8 @@ private:
     ObjectGuid _bgInterruptTargetGuid;  // which enemy cast we're delaying for
     uint32 _bgFakeCastCooldown{};       // cooldown between fake cast attempts (prevents spam)
     uint32 _bgRetreatCooldown{};        // cooldown between retreat checks (prevents spam)
+    float _bgCombatHunger{0.5f};        // 0-1: how much the bot wants combat (builds out of combat)
+    float _bgCombatHungerRate{1.0f};    // per-bot growth multiplier (0.5-0.75 for defensive bots)
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};
