@@ -16660,6 +16660,8 @@ void bot_ai::JustDied(Unit* u)
         _bgPathRecordTimer = 0;
         _bgBypassCommitTimer = 0;
         _bgBypassStep = 0;
+        _bgLastProgressDist = 9999.0f;
+        _bgProgressTimer = 0;
 
         // Class matchup: they killed me
         if (u)
@@ -19456,9 +19458,77 @@ void bot_ai::CommonTimers(uint32 diff)
             }
         }
 
+        // Progress detection: detect oscillation (moving but not getting closer to objective)
+        // The stuck detection below only catches frozen bots. This catches bots that are
+        // moving back and forth without making progress (e.g., oscillating at an obstacle edge).
+        bool oscillating = false;
+        if (IsWanderer() && _bgHasObjective && me->isMoving() &&
+            _bgBypassCommitTimer == 0) // don't interrupt a bypass in progress
+        {
+            float curDistToObj = me->GetExactDist2d(_bgObjectivePos);
+            if (_bgLastProgressDist >= 9000.0f)
+            {
+                // First reading — initialize
+                _bgLastProgressDist = curDistToObj;
+                _bgProgressTimer = 0;
+            }
+            else
+            {
+                // Progress made? Must decrease by at least 3yd from last recorded distance
+                if (curDistToObj < _bgLastProgressDist - 3.0f)
+                {
+                    // Real progress — reset timer and update reference
+                    _bgLastProgressDist = curDistToObj;
+                    _bgProgressTimer = 0;
+                }
+                else
+                {
+                    // No progress (or moving away) — accumulate stuck time
+                    _bgProgressTimer += diff;
+                    if (_bgProgressTimer >= 4000) // 4 seconds of no progress while moving
+                    {
+                        oscillating = true;
+                        _bgProgressTimer = 0;
+                        _bgLastProgressDist = curDistToObj; // reset baseline
+
+                        // Record wall hits along the oscillation area + path history
+                        float ox = me->GetPositionX(), oy = me->GetPositionY();
+                        uint32 mapId = me->GetMapId();
+                        for (int i = 0; i < 3; ++i)
+                            BotBGAIMgr::RecordWallHit(mapId, ox, oy);
+                        // Path penalization
+                        for (uint8 i = 0; i < _bgPathHistoryCount; ++i)
+                        {
+                            uint8 idx = (_bgPathHistoryHead + BG_PATH_HISTORY_SIZE - 1 - i) % BG_PATH_HISTORY_SIZE;
+                            Position const& p = _bgPathHistory[idx];
+                            uint8 hitCount = (i < 4) ? (4 - i) : 0;
+                            if (hitCount == 0) break;
+                            for (uint8 h = 0; h < hitCount; ++h)
+                                BotBGAIMgr::RecordWallHit(mapId, p.GetPositionX(), p.GetPositionY());
+                        }
+                        _bgPathHistoryCount = 0;
+                        _bgPathHistoryHead = 0;
+
+                        // Plan bypass
+                        if (PlanBGBypass())
+                        {
+                            me->GetMotionMaster()->Clear();
+                            me->StopMoving();
+                            _bgReactionDelay = 0;
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            _bgLastProgressDist = 9999.0f;
+            _bgProgressTimer = 0;
+        }
+
         // Stuck detection: detect phantom obstacles (M2 doodads with collision but no LOS)
         // If the bot has a movement target but isn't actually moving, record heavy wall hits
-        if (IsWanderer() && me->isMoving() && _bgHasObjective)
+        if (IsWanderer() && me->isMoving() && _bgHasObjective && !oscillating)
         {
             float distMoved = me->GetExactDist2d(_bgLastStuckPos);
             if (distMoved < 1.0f)
@@ -19493,89 +19563,9 @@ void bot_ai::CommonTimers(uint32 diff)
                     _bgPathHistoryCount = 0;
                     _bgPathHistoryHead = 0;
 
-                    // BYPASS PLANNING: plot a 3-step route around the obstacle
-                    // Instead of just reassessing (which leads to oscillation), commit to
-                    // going sideways → forward → sideways back toward the original objective
-                    if (_bgHasObjective)
-                    {
-                        // Vector from bot to current objective
-                        float dx = _bgObjectivePos.m_positionX - sx;
-                        float dy = _bgObjectivePos.m_positionY - sy;
-                        float len = std::sqrt(dx*dx + dy*dy);
-                        if (len > 1.0f)
-                        {
-                            float dirX = dx / len;
-                            float dirY = dy / len;
-                            // Perpendicular vector (left and right)
-                            float perpLX = -dirY, perpLY = dirX;
-                            float perpRX = dirY, perpRY = -dirX;
-
-                            // Pick side with fewer wall hits nearby
-                            float testDist = 25.0f;
-                            float leftTestX = sx + perpLX * testDist;
-                            float leftTestY = sy + perpLY * testDist;
-                            float rightTestX = sx + perpRX * testDist;
-                            float rightTestY = sy + perpRY * testDist;
-
-                            auto leftWPs = BotBGAIMgr::GetLearnedWaypointsNear(mapId, leftTestX, leftTestY, 15.0f);
-                            auto rightWPs = BotBGAIMgr::GetLearnedWaypointsNear(mapId, rightTestX, rightTestY, 15.0f);
-                            uint32 leftWallHits = 0, rightWallHits = 0;
-                            for (auto const& wp : leftWPs) leftWallHits += wp.wallHits;
-                            for (auto const& wp : rightWPs) rightWallHits += wp.wallHits;
-
-                            // Prefer side with less wall hits (or random if tied)
-                            bool goLeft = (leftWallHits < rightWallHits) ||
-                                          (leftWallHits == rightWallHits && urand(0, 1) == 0);
-                            float chosenPerpX = goLeft ? perpLX : perpRX;
-                            float chosenPerpY = goLeft ? perpLY : perpRY;
-
-                            // Plan 3 waypoints:
-                            // Step 1: perpendicular 20yd sideways (escape the obstacle's forward blocker)
-                            // Step 2: forward 25yd along original direction (bypass the obstacle)
-                            // Step 3: rejoin original path closer to objective
-                            float wp1X = sx + chosenPerpX * 20.0f;
-                            float wp1Y = sy + chosenPerpY * 20.0f;
-                            float wp2X = wp1X + dirX * 25.0f;
-                            float wp2Y = wp1Y + dirY * 25.0f;
-                            float wp3X = wp2X + (dirX - chosenPerpX * 0.5f) * 15.0f;
-                            float wp3Y = wp2Y + (dirY - chosenPerpY * 0.5f) * 15.0f;
-
-                            // Ground validate each waypoint
-                            auto validateZ = [this](float& x, float& y, float& z) -> bool {
-                                z = me->GetPositionZ();
-                                me->UpdateGroundPositionZ(x, y, z);
-                                return z > INVALID_HEIGHT;
-                            };
-                            float wp1Z = 0, wp2Z = 0, wp3Z = 0;
-                            bool v1 = validateZ(wp1X, wp1Y, wp1Z);
-                            bool v2 = validateZ(wp2X, wp2Y, wp2Z);
-                            bool v3 = validateZ(wp3X, wp3Y, wp3Z);
-
-                            if (v1)
-                            {
-                                _bgBypassTargets[0].Relocate(wp1X, wp1Y, wp1Z);
-                                _bgBypassTargets[1].Relocate(wp2X, wp2Y, v2 ? wp2Z : wp1Z);
-                                _bgBypassTargets[2].Relocate(wp3X, wp3Y, v3 ? wp3Z : wp1Z);
-                                _bgBypassStep = 1; // start at step 1
-                                _bgBypassCommitTimer = 15000; // commit for 15 seconds
-                                _bgObjectivePos.Relocate(_bgBypassTargets[0]);
-                                // Don't clear _bgHasObjective — we're still committed to reaching the target
-                            }
-                            else
-                            {
-                                // Couldn't plan — fall back to old behavior
-                                _bgHasObjective = false;
-                            }
-                        }
-                        else
-                        {
-                            _bgHasObjective = false;
-                        }
-                    }
-                    else
-                    {
+                    // Plan a 3-step bypass route around the obstacle
+                    if (!PlanBGBypass())
                         _bgHasObjective = false;
-                    }
 
                     // Force bot to abandon current path
                     me->GetMotionMaster()->Clear();
@@ -22426,6 +22416,78 @@ Unit* bot_ai::SelectBGHealTarget(std::list<Unit*> const& targets) const
     }
 
     return bestTarget;
+}
+
+bool bot_ai::PlanBGBypass()
+{
+    if (!_bgHasObjective)
+        return false;
+
+    float sx = me->GetPositionX();
+    float sy = me->GetPositionY();
+    uint32 mapId = me->GetMapId();
+
+    // Vector from bot to current objective
+    float dx = _bgObjectivePos.m_positionX - sx;
+    float dy = _bgObjectivePos.m_positionY - sy;
+    float len = std::sqrt(dx*dx + dy*dy);
+    if (len < 1.0f)
+        return false;
+
+    float dirX = dx / len;
+    float dirY = dy / len;
+    // Perpendicular vectors (left and right)
+    float perpLX = -dirY, perpLY = dirX;
+    float perpRX = dirY, perpRY = -dirX;
+
+    // Sample wall hits 25yd to left and right
+    float testDist = 25.0f;
+    float leftTestX = sx + perpLX * testDist;
+    float leftTestY = sy + perpLY * testDist;
+    float rightTestX = sx + perpRX * testDist;
+    float rightTestY = sy + perpRY * testDist;
+
+    auto leftWPs = BotBGAIMgr::GetLearnedWaypointsNear(mapId, leftTestX, leftTestY, 15.0f);
+    auto rightWPs = BotBGAIMgr::GetLearnedWaypointsNear(mapId, rightTestX, rightTestY, 15.0f);
+    uint32 leftWallHits = 0, rightWallHits = 0;
+    for (auto const& wp : leftWPs) leftWallHits += wp.wallHits;
+    for (auto const& wp : rightWPs) rightWallHits += wp.wallHits;
+
+    // Pick cleaner side (ties broken randomly)
+    bool goLeft = (leftWallHits < rightWallHits) ||
+                  (leftWallHits == rightWallHits && urand(0, 1) == 0);
+    float chosenPerpX = goLeft ? perpLX : perpRX;
+    float chosenPerpY = goLeft ? perpLY : perpRY;
+
+    // Plan 3 waypoints: sidestep → forward → rejoin
+    float wp1X = sx + chosenPerpX * 20.0f;
+    float wp1Y = sy + chosenPerpY * 20.0f;
+    float wp2X = wp1X + dirX * 25.0f;
+    float wp2Y = wp1Y + dirY * 25.0f;
+    float wp3X = wp2X + (dirX - chosenPerpX * 0.5f) * 15.0f;
+    float wp3Y = wp2Y + (dirY - chosenPerpY * 0.5f) * 15.0f;
+
+    // Ground validate
+    float wp1Z = me->GetPositionZ();
+    me->UpdateGroundPositionZ(wp1X, wp1Y, wp1Z);
+    if (wp1Z <= INVALID_HEIGHT)
+        return false; // couldn't find valid ground for step 1
+
+    float wp2Z = wp1Z;
+    me->UpdateGroundPositionZ(wp2X, wp2Y, wp2Z);
+    if (wp2Z <= INVALID_HEIGHT) wp2Z = wp1Z;
+
+    float wp3Z = wp2Z;
+    me->UpdateGroundPositionZ(wp3X, wp3Y, wp3Z);
+    if (wp3Z <= INVALID_HEIGHT) wp3Z = wp2Z;
+
+    _bgBypassTargets[0].Relocate(wp1X, wp1Y, wp1Z);
+    _bgBypassTargets[1].Relocate(wp2X, wp2Y, wp2Z);
+    _bgBypassTargets[2].Relocate(wp3X, wp3Y, wp3Z);
+    _bgBypassStep = 1;
+    _bgBypassCommitTimer = 15000;
+    _bgObjectivePos.Relocate(_bgBypassTargets[0]);
+    return true;
 }
 
 bool bot_ai::ShouldBGRetreat(uint32 diff)

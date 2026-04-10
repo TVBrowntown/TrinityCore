@@ -244,6 +244,8 @@ public:
     bool ShouldBGRetreat(uint32 diff);
     // Combat hunger getter (0-1, builds out of combat)
     float GetBGCombatHunger() const { return _bgCombatHunger; }
+    // Plan a 3-waypoint bypass route around an obstacle
+    bool PlanBGBypass();
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
@@ -833,6 +835,8 @@ private:
     uint8 _bgCurrentTargetNode{0xFF};   // node index for AB/EY intents
     Position _bgLastStuckPos{};         // last position checked for stuck detection
     uint32 _bgStuckTimer{};             // time since last position change
+    float _bgLastProgressDist{};        // last recorded distance to objective (for oscillation detect)
+    uint32 _bgProgressTimer{};          // time since last meaningful progress toward objective
     Position _bgLastValidPos{};         // last known-good position for clip recovery
     uint32 _bgClipCheckTimer{};         // throttle for Z sanity check
     // Path history: ring buffer of recent positions for retroactive wall-hit penalization

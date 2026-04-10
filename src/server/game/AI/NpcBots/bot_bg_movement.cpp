@@ -527,6 +527,8 @@ void bot_ai::OnBotEnterBattleground()
     _bgCurrentTargetNode = 0xFF;
     _bgLastStuckPos.Relocate(0.0f, 0.0f, 0.0f);
     _bgStuckTimer = 0;
+    _bgLastProgressDist = 9999.0f;
+    _bgProgressTimer = 0;
     _bgLastValidPos.Relocate(me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
     _bgClipCheckTimer = 0;
     _bgPathHistoryHead = 0;
