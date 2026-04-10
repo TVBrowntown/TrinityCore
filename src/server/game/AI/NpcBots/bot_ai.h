@@ -833,6 +833,8 @@ private:
     uint8 _bgCurrentTargetNode{0xFF};   // node index for AB/EY intents
     Position _bgLastStuckPos{};         // last position checked for stuck detection
     uint32 _bgStuckTimer{};             // time since last position change
+    Position _bgLastValidPos{};         // last known-good position for clip recovery
+    uint32 _bgClipCheckTimer{};         // throttle for Z sanity check
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};

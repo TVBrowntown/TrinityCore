@@ -19222,6 +19222,99 @@ void bot_ai::CommonTimers(uint32 diff)
             _bgCombatHunger = std::min(1.0f, _bgCombatHunger + growth);
         }
 
+        // Z clip recovery: detect when bot has fallen through terrain / clipped into geometry
+        // Some M2 doodads (like WSG spikes) can displace bots to invalid positions where they
+        // exist at the wrong Z, damage players through walls, and become visually invisible.
+        if (IsWanderer() && me->GetMap()->IsBattlegroundOrArena() && !JumpingOrFalling() && !me->IsFlying())
+        {
+            if (_bgClipCheckTimer > diff) _bgClipCheckTimer -= diff;
+            else
+            {
+                _bgClipCheckTimer = 500; // check every 500ms
+
+                float curX = me->GetPositionX();
+                float curY = me->GetPositionY();
+                float curZ = me->GetPositionZ();
+
+                // Query what the ground SHOULD be at current XY
+                float expectedGround = curZ;
+                me->UpdateGroundPositionZ(curX, curY, expectedGround);
+
+                // Also query MMAP pathing to see what walkable Z it thinks we should be at
+                float mapHeight = me->GetMap()->GetHeight(me->GetPhaseMask(), curX, curY, curZ + 5.0f, true, 50.0f);
+
+                bool clipped = false;
+
+                // Case 1: bot is way below expected ground (fell through)
+                if (expectedGround > INVALID_HEIGHT && curZ < expectedGround - 5.0f)
+                    clipped = true;
+
+                // Case 2: MMAP thinks we should be significantly higher (inside a floor)
+                if (mapHeight > INVALID_HEIGHT && mapHeight > curZ + 8.0f && mapHeight - curZ < 100.0f)
+                    clipped = true;
+
+                // Case 3: Z is wildly out of bounds (sub-terrain)
+                if (curZ < -100.0f)
+                    clipped = true;
+
+                if (clipped)
+                {
+                    // Recover: teleport to last known-good position
+                    if (_bgLastValidPos.GetPositionZ() > INVALID_HEIGHT &&
+                        me->GetExactDist2d(_bgLastValidPos) < 150.0f)
+                    {
+                        // Stop all movement/combat before teleport
+                        me->GetMotionMaster()->Clear();
+                        me->StopMoving();
+                        me->AttackStop();
+                        me->CombatStop(true);
+                        me->NearTeleportTo(_bgLastValidPos.GetPositionX(),
+                            _bgLastValidPos.GetPositionY(),
+                            _bgLastValidPos.GetPositionZ(),
+                            me->GetOrientation());
+
+                        // Record heavy wall hits around the clip location so future bots avoid it
+                        for (int i = 0; i < 8; ++i)
+                        {
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), curX, curY);
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), curX + 3.0f, curY);
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), curX - 3.0f, curY);
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), curX, curY + 3.0f);
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), curX, curY - 3.0f);
+                        }
+
+                        _bgHasObjective = false;
+                        _bgNeedsReassessment = true;
+                        _bgReactionDelay = 0;
+                    }
+                    else
+                    {
+                        // No valid recovery pos — teleport to team start
+                        Battleground* bgPtr = GetBG();
+                        if (bgPtr)
+                        {
+                            TeamId myTeamId = bgPtr->GetBotTeamId(me->GetGUID());
+                            Position const* startPos = bgPtr->GetTeamStartPosition(myTeamId);
+                            if (startPos)
+                            {
+                                me->GetMotionMaster()->Clear();
+                                me->StopMoving();
+                                me->AttackStop();
+                                me->CombatStop(true);
+                                me->NearTeleportTo(startPos->GetPositionX(), startPos->GetPositionY(),
+                                    startPos->GetPositionZ(), me->GetOrientation());
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Position looks valid — update last known good position
+                    _bgLastValidPos.Relocate(curX, curY, curZ);
+                }
+            }
+        }
+
         // Stuck detection: detect phantom obstacles (M2 doodads with collision but no LOS)
         // If the bot has a movement target but isn't actually moving, record heavy wall hits
         if (IsWanderer() && me->isMoving() && _bgHasObjective)
