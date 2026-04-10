@@ -829,6 +829,8 @@ private:
     uint32 _bgRetreatCooldown{};        // cooldown between retreat checks (prevents spam)
     float _bgCombatHunger{0.5f};        // 0-1: how much the bot wants combat (builds out of combat)
     float _bgCombatHungerRate{1.0f};    // per-bot growth multiplier (0.5-0.75 for defensive bots)
+    uint8 _bgCurrentIntent{0xFF};       // current INTENT_* the bot is acting on (for stale check)
+    uint8 _bgCurrentTargetNode{0xFF};   // node index for AB/EY intents
 
     uint32 _groupUpdateMask{};
     uint64 _auraRaidUpdateMask{};

@@ -523,6 +523,8 @@ void bot_ai::OnBotEnterBattleground()
     _bgInterruptTargetGuid.Clear();
     _bgFakeCastCooldown = 0;
     _bgRetreatCooldown = 0;
+    _bgCurrentIntent = 0xFF;
+    _bgCurrentTargetNode = 0xFF;
     // Combat hunger: high initial value pulls bots out of spawn at start
     _bgCombatHunger = 0.7f;
     {

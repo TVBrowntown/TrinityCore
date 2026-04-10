@@ -16657,6 +16657,8 @@ void bot_ai::JustDied(Unit* u)
         _bgInterruptTargetGuid.Clear();
         _bgFakeCastCooldown = 0;
         _bgRetreatCooldown = 0;
+        _bgCurrentIntent = 0xFF;
+        _bgCurrentTargetNode = 0xFF;
 
         // Class matchup: they killed me
         if (u)
@@ -22207,6 +22209,107 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
     if (_bgCurrentStrategy >= BG_STRATEGY_MAX || _bgNeedsReassessment)
         SelectBGStrategy();
 
+    // Stale objective check: if game state invalidates current intent, force re-evaluation
+    // (bypasses reaction delay so bots react immediately to changing situations)
+    bool intentStale = false;
+    if (_bgHasObjective && _bgCurrentIntent != 0xFF)
+    {
+        TeamId checkTeamId = bg->GetBotTeamId(me->GetGUID());
+        TeamId enemyTeamId = checkTeamId == TEAM_ALLIANCE ? TEAM_HORDE : TEAM_ALLIANCE;
+
+        switch (_bgCurrentIntent)
+        {
+            case INTENT_CHASE_FC:
+            {
+                // Was chasing enemy FC — but is the flag still on a player?
+                if (bg->GetTypeID() == BATTLEGROUND_WS)
+                {
+                    if (bg->GetFlagPickerGUID(checkTeamId).IsEmpty())
+                        intentStale = true; // FC died or capped, our flag returned
+                }
+                else if (bg->GetTypeID() == BATTLEGROUND_EY)
+                {
+                    BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+                    if (ey && ey->GetFlagPickerGUID().IsEmpty())
+                        intentStale = true;
+                }
+                break;
+            }
+            case INTENT_ATTACK_FLAG:
+            {
+                // Was going to grab enemy flag — but do we already have it?
+                if (bg->GetTypeID() == BATTLEGROUND_WS && !bg->GetFlagPickerGUID(enemyTeamId).IsEmpty())
+                    intentStale = true; // someone already grabbed it
+                break;
+            }
+            case INTENT_DEFEND_FLAG:
+            {
+                // Was defending own flag — but is enemy now carrying it?
+                if (bg->GetTypeID() == BATTLEGROUND_WS && !bg->GetFlagPickerGUID(checkTeamId).IsEmpty())
+                    intentStale = true; // enemy took it, defending empty base is pointless
+                break;
+            }
+            case INTENT_ESCORT_FC:
+            {
+                // Was escorting friendly FC — but is the flag still carried?
+                if (bg->GetTypeID() == BATTLEGROUND_WS && bg->GetFlagPickerGUID(enemyTeamId).IsEmpty())
+                    intentStale = true; // FC died or capped
+                break;
+            }
+            case INTENT_ATTACK_NODE:
+            {
+                // Was attacking a node — do we now own it?
+                if (_bgCurrentTargetNode != 0xFF)
+                {
+                    if (bg->GetTypeID() == BATTLEGROUND_AB)
+                    {
+                        BattlegroundAB const* ab = dynamic_cast<BattlegroundAB const*>(bg);
+                        if (ab && ab->IsNodeOccupied(_bgCurrentTargetNode, checkTeamId))
+                            intentStale = true;
+                    }
+                    else if (bg->GetTypeID() == BATTLEGROUND_EY)
+                    {
+                        BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+                        if (ey && ey->GetPointOwner(_bgCurrentTargetNode) == checkTeamId)
+                            intentStale = true;
+                    }
+                }
+                break;
+            }
+            case INTENT_DEFEND_NODE:
+            {
+                // Was defending a node — did we lose it?
+                if (_bgCurrentTargetNode != 0xFF)
+                {
+                    if (bg->GetTypeID() == BATTLEGROUND_AB)
+                    {
+                        BattlegroundAB const* ab = dynamic_cast<BattlegroundAB const*>(bg);
+                        if (ab && !ab->IsNodeOccupied(_bgCurrentTargetNode, checkTeamId))
+                            intentStale = true;
+                    }
+                    else if (bg->GetTypeID() == BATTLEGROUND_EY)
+                    {
+                        BattlegroundEY const* ey = dynamic_cast<BattlegroundEY const*>(bg);
+                        if (ey && ey->GetPointOwner(_bgCurrentTargetNode) != checkTeamId)
+                            intentStale = true;
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    if (intentStale)
+    {
+        // Clear current intent and force fresh evaluation immediately
+        _bgHasObjective = false;
+        _bgCurrentIntent = 0xFF;
+        _bgCurrentTargetNode = 0xFF;
+        _bgReactionDelay = 0;
+    }
+
     bool isOpeningRush = bg->GetStartTime() < 210000;
     if (!isOpeningRush && _bgReactionDelay > 0 && _bgHasObjective)
         return nullptr;
@@ -22243,6 +22346,8 @@ WanderNode const* bot_ai::GetNextBGTravelNodeWithIntelligence()
         _bgAssignedRole = best.role;
         _bgObjectivePos.Relocate(best.targetPos);
         _bgHasObjective = true;
+        _bgCurrentIntent = best.intentType;
+        _bgCurrentTargetNode = best.targetNode;
         BotBGAIMgr::BroadcastIntention(bg->GetInstanceID(), myTeamId, me->GetGUID(),
             best.intentType, best.targetNode);
     }
