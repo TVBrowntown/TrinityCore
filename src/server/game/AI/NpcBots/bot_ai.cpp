@@ -19822,10 +19822,44 @@ void bot_ai::Evade()
                         }
                     }
 
-                    // Visual authenticity: rare random hop while moving (not in combat)
-                    // Players hop occasionally while running across the map
-                    // DISABLED: causes Z desync when followed by a point movement command
-                    // (bots clip through ground because the jump arc gets interrupted)
+                    // FINAL LOS validation: check destination AND midpoint at multiple heights
+                    // Catches obstacles missed by MMAP (tree stumps, low rocks, props) and
+                    // any case where the destination ended up at a bad Z after fallbacks
+                    if (me->GetMap()->IsBattlegroundOrArena() && !JumpingOrFalling())
+                    {
+                        // Re-validate ground Z one more time — defends against stale positions
+                        float finalGround = pos.m_positionZ;
+                        me->UpdateGroundPositionZ(pos.m_positionX, pos.m_positionY, finalGround);
+                        if (finalGround <= INVALID_HEIGHT)
+                        {
+                            // Bad ground — record wall hit and skip
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), pos.m_positionX, pos.m_positionY);
+                            return;
+                        }
+                        pos.m_positionZ = finalGround;
+
+                        // Multi-height LOS: check at chest (2.0) AND ankle (0.5) heights
+                        // Chest catches walls and tall obstacles, ankle catches stumps and low props
+                        bool losChest = me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 2.0f,
+                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+                        bool losAnkle = me->IsWithinLOS(pos.m_positionX, pos.m_positionY, pos.m_positionZ + 0.5f,
+                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+
+                        // Also check midpoint to catch obstacles between us and destination
+                        float midX = (me->GetPositionX() + pos.m_positionX) * 0.5f;
+                        float midY = (me->GetPositionY() + pos.m_positionY) * 0.5f;
+                        float midZ = (me->GetPositionZ() + pos.m_positionZ) * 0.5f;
+                        bool losMid = me->IsWithinLOS(midX, midY, midZ + 1.0f,
+                            LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::Nothing);
+
+                        if (!losChest || !losAnkle || !losMid)
+                        {
+                            // Path blocked — record wall hit and skip movement this tick
+                            // Next tick will pick a new PF direction (wall avoidance force kicks in)
+                            BotBGAIMgr::RecordWallHit(me->GetMapId(), pos.m_positionX, pos.m_positionY);
+                            return;
+                        }
+                    }
 
                     // Only jump for true ledge drops: very steep (>8yd drop over <6yd horizontal)
                     // AND MMAP can't find a walkable path down.
