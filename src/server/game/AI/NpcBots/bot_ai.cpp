@@ -19263,13 +19263,28 @@ void bot_ai::CommonTimers(uint32 diff)
                 float expectedGround = curZ;
                 me->UpdateGroundPositionZ(curX, curY, expectedGround);
 
-                // Also query MMAP pathing to see what walkable Z it thinks we should be at
+                // Also query VMAP-inclusive height (what the visible mesh shows)
                 float mapHeight = me->GetMap()->GetHeight(me->GetPhaseMask(), curX, curY, curZ + 5.0f, true, 50.0f);
+
+                // GENTLE Z CORRECTION: if bot is slightly below visible terrain (0.5 - 3 yards)
+                // silently nudge them back up. This handles MMAP/VMAP vs visible mesh drift.
+                if (expectedGround > INVALID_HEIGHT && !me->isMoving())
+                {
+                    float drift = expectedGround - curZ;
+                    if (drift > 0.5f && drift < 3.0f)
+                    {
+                        // Small correction — quietly update Z
+                        me->Relocate(curX, curY, expectedGround);
+                        me->SendMovementFlagUpdate();
+                        curZ = expectedGround;
+                    }
+                }
 
                 bool clipped = false;
 
-                // Case 1: bot is way below expected ground (fell through)
-                if (expectedGround > INVALID_HEIGHT && curZ < expectedGround - 5.0f)
+                // Case 1: bot is below expected ground (fell through or MMAP/VMAP drift)
+                // Threshold 3yd: catches small MMAP navmesh drift but not legitimate stair drops
+                if (expectedGround > INVALID_HEIGHT && curZ < expectedGround - 3.0f)
                     clipped = true;
 
                 // Case 2: MMAP thinks we should be significantly higher (inside a floor)
