@@ -640,9 +640,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
     // Combat hunger: builds when bot hasn't fought in a while, boosts combat-seeking actions
     // Pulls bots out of base when they're doing laps without engaging
+    // IMPORTANT: hunger should never overtake objective actions — objectives always score higher
     float hunger = me->GetBotAI() ? me->GetBotAI()->GetBGCombatHunger() : 0.0f;
-    float hungerAttackBoost = hunger * 0.3f;     // boost attack actions
-    float hungerFightBoost = hunger * 0.5f;      // boost midfield fighting most
+    float hungerAttackBoost = hunger * 0.3f;     // boost objective attack actions (highest)
+    float hungerFightBoost = hunger * 0.2f;      // boost midfield fighting (less than attacks)
     float hungerDefendPenalty = hunger * 0.25f;  // penalize defending when bored
 
     bool isOpeningRush = bg->GetStartTime() < 210000;
@@ -785,10 +786,12 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     Position(myFlagX, myFlagY, myFlagZ), 2, INTENT_DEFEND_FLAG);
             }
 
-            // --- FIGHT MIDFIELD (always available, low priority) ---
+            // --- FIGHT MIDFIELD (always available, low priority — never overtakes objectives) ---
             {
                 float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f + hungerFightBoost;
                 if (isOpeningRush) score += 0.15f;
+                // Hard cap below the lowest objective base score to ensure objectives always win
+                score = std::min(score, 0.65f);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(MID_X, MID_Y, MID_Z), 1, INTENT_ROAM);
             }
@@ -899,9 +902,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 }
             }
 
-            // FIGHT MIDFIELD (roaming)
+            // FIGHT MIDFIELD (roaming) — capped below lowest objective base
             {
                 float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
+                score = std::min(score, 0.55f);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(1185.0f, 1184.0f, -56.0f), 1, INTENT_ROAM); // AB center
             }
@@ -1076,9 +1080,10 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 }
             }
 
-            // Fight midfield
+            // Fight midfield — capped below lowest objective base
             {
                 float score = 0.2f + p.aggression * 0.15f - p.objectiveFocus * 0.1f + hungerFightBoost;
+                score = std::min(score, 0.55f);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(2174.0f, 1569.0f, 1160.0f), 1, INTENT_ROAM);
             }
