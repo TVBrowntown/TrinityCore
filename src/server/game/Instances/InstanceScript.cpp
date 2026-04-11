@@ -925,7 +925,7 @@ void InstanceScript::SendEncounterUnit(EncounterFrameType type, Unit const* unit
     instance->SendToPlayers(&data);
 }
 
-void InstanceScript::UpdateEncounterState(EncounterCreditType type, uint32 creditEntry, Unit* /*source*/)
+void InstanceScript::UpdateEncounterState(EncounterCreditType type, uint32 creditEntry, Unit* source)
 {
     DungeonEncounterList const* encounters = sObjectMgr->GetDungeonEncounterList(instance->GetId(), instance->GetDifficulty());
     if (!encounters)
@@ -938,6 +938,20 @@ void InstanceScript::UpdateEncounterState(EncounterCreditType type, uint32 credi
         if (encounter->creditType == type && encounter->creditEntry == creditEntry)
         {
             completedEncounters |= 1 << encounter->dbcEntry->Bit;
+            // @duskhaven-port
+            if (source)
+            {
+                if (instance->IsRaid())
+                {
+                    FIRE_ID(instance->GetEntry()->ID, Instance, OnRaidBossKilled,
+                            TSInstance(instance, this), TSUnit(source));
+                }
+                else if (instance->IsDungeon())
+                {
+                    FIRE_ID(instance->GetEntry()->ID, Instance, OnDungeonBossKilled,
+                            TSInstance(instance, this), TSUnit(source));
+                }
+            }
             if (encounter->lastEncounterDungeon)
             {
                 dungeonId = encounter->lastEncounterDungeon;
@@ -964,6 +978,10 @@ void InstanceScript::UpdateEncounterState(EncounterCreditType type, uint32 credi
                 }
             }
         }
+
+        // @duskhaven-port
+        FIRE_ID(instance->GetEntry()->ID, Instance, OnDungeonCompleted,
+                TSInstance(instance, this));
     }
 }
 
@@ -1016,6 +1034,22 @@ void InstanceScript::Update(uint32 diff)
         , TSInstance(instance, this)
         , diff
     );
+}
+
+// @duskhaven-port
+bool InstanceScript::HandleRelease(Player* who)
+{
+    bool handledReleaseCorpse = false;
+    FIRE_ID(instance->GetEntry()->ID, Instance, HandleRelease,
+            TSInstance(instance, this), TSPlayer(who),
+            TSMutable<bool, bool>(&handledReleaseCorpse));
+    return handledReleaseCorpse;
+}
+
+void InstanceScript::TriggerResetHook()
+{
+    FIRE_ID(instance->GetEntry()->ID, Instance, ResetInstance,
+            TSInstance(instance, this));
 }
 
 void InstanceScript::OnPlayerEnter(Player* player)

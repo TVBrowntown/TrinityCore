@@ -25,6 +25,13 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "ScriptMgr.h"
+// @duskhaven-port
+#include "TSIncludes.h"
+#include "TSEvents.h"
+#include "TSUnit.h"
+#include "TSSpellInfo.h"
+#include "TSSpell.h"
+#include "Spell.h"
 #include "Transport.h"
 #include "Unit.h"
 #include "UpdateData.h"
@@ -67,6 +74,13 @@ void DynamicObject::RemoveFromWorld()
     {
         if (_isViewpoint)
             RemoveCasterViewpoint();
+
+        // @duskhaven-port
+        {
+            SpellDestination dest(*this);
+            FIRE_ID(GetSpellInfo()->events.id, Spell, OnDynObjectRemove,
+                    TSUnit(GetCaster()), TSSpellDestination(&dest));
+        }
 
         if (_aura)
             RemoveAura();

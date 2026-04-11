@@ -189,6 +189,10 @@ class TC_GAME_API InstanceScript : public ZoneScript
         virtual void Update(uint32 /*diff*/);
         // @tswow-end
 
+        // @duskhaven-port
+        bool HandleRelease(Player* who);
+        void TriggerResetHook();
+
         // Used by the map's CannotEnter function.
         // This is to prevent players from entering during boss encounters.
         virtual bool IsEncounterInProgress() const;

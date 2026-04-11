@@ -43,6 +43,8 @@
 // @tswow-begin
 #include "TSAura.h"
 // @tswow-end
+// @duskhaven-port
+#include "TSDynObj.h"
 
 AuraCreateInfo::AuraCreateInfo(SpellInfo const* spellInfo, uint8 auraEffMask, WorldObject* owner) :
     _spellInfo(spellInfo), _auraEffectMask(auraEffMask), _owner(owner)
@@ -754,8 +756,15 @@ void Aura::UpdateTargetMap(Unit* caster, bool apply)
 
     // remove auras from units no longer needing them
     for (Unit* unit : targetsToRemove)
+    {
+        // @duskhaven-port
+        if (DynObjAura* dynAura = ToDynObjAura())
+            FIRE_ID(m_spellInfo->events.id, Spell, OnPAARemoved,
+                    TSUnit(unit), TSUnit(caster), TSDynObj(dynAura->GetDynobjOwner()));
+
         if (AuraApplication* aurApp = GetApplicationOfTarget(unit->GetGUID()))
             unit->_UnapplyAura(aurApp, AURA_REMOVE_BY_DEFAULT);
+    }
 
     if (!apply)
         return;
