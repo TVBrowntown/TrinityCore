@@ -750,6 +750,8 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
     //end npcbot
     // Hook for OnDamage Event
     sScriptMgr->OnDamage(attacker, victim, damage);
+    // @duskhaven-port
+    FIRE(Unit, OnDamageDealt, TSUnit(attacker), TSUnit(victim), TSNumber<uint32>(damage));
 
     // Signal to pets that their owner was attacked - except when DOT.
     if (attacker != victim && damagetype != DOT)
@@ -850,7 +852,14 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
                 if (cleanDamage->hitOutCome == MELEE_HIT_CRIT)
                     weaponSpeedHitFactor *= 2;
 
-                attacker->RewardRage(rage_damage, weaponSpeedHitFactor, true);
+                // @duskhaven-port
+                {
+                    uint32 rage = rage_damage;
+                    FIRE(Unit, OnRageGainedViaAttack, TSUnit(attacker), TSUnit(victim),
+                         TSNumber<uint8>(cleanDamage->hitOutCome),
+                         TSMutableNumber<uint32>(&rage));
+                    attacker->RewardRage(rage, weaponSpeedHitFactor, true);
+                }
                 break;
             }
             case RANGED_ATTACK:
@@ -946,6 +955,9 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
             victim->ToCreature()->LowerPlayerDamageReq(health < damage ?  health : damage);
     }
 
+    // @duskhaven-port - allow scripts to modify incoming damage (e.g. prevent player death)
+    FIRE(Unit, OnCustomDamageTaken, TSUnit(victim), TSUnit(attacker), TSMutableNumber<uint32>(&damage));
+
     if (health <= damage)
     {
         if (victim->GetTypeId() == TYPEID_PLAYER && victim != attacker)
@@ -959,6 +971,12 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
             victim->ToPlayer()->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_TOTAL_DAMAGE_RECEIVED, damage);
 
         victim->ModifyHealth(-(int32)damage);
+
+        // @duskhaven-port
+        FIRE(Unit, OnDamageTaken, TSUnit(victim), TSUnit(attacker), TSNumber<uint32>(damage));
+        if (Creature* victimCreature = victim->ToCreature())
+            FIRE_ID(victimCreature->GetCreatureTemplate()->events.id, Creature, OnDamageTaken,
+                    TSCreature(victimCreature), TSUnit(attacker), TSNumber<uint32>(damage));
 
         if (damagetype == DIRECT_DAMAGE || damagetype == SPELL_DIRECT_DAMAGE)
             victim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_DIRECT_DAMAGE, spellProto ? spellProto->Id : 0);
@@ -3546,6 +3564,9 @@ Aura* Unit::_TryStackingOrRefreshingExistingAura(AuraCreateInfo& createInfo)
 
             // try to increase stack amount
             foundAura->ModStackAmount(1, AURA_REMOVE_BY_DEFAULT, createInfo.ResetPeriodicTimer);
+            // @duskhaven-port
+            FIRE_ID(createInfo.GetSpellInfo()->events.id, Spell, OnAuraApplied,
+                    TSUnit(foundAura->GetCaster()), TSAura(const_cast<Aura*>(foundAura)), TSUnit(this));
             return foundAura;
         }
     }
@@ -3783,6 +3804,10 @@ void Unit::_UnapplyAura(AuraApplicationMap::iterator& i, AuraRemoveMode removeMo
             player->UpdateVisibleGameobjectsOrSpellClicks();
 
     i = m_appliedAuras.begin();
+
+    // @duskhaven-port
+    FIRE_ID(aura->GetSpellInfo()->events.id, Spell, OnAuraRemoved,
+            TSAura(const_cast<Aura*>(aura)), TSUnit(this), TSNumber<uint32>(removeMode));
 }
 
 void Unit::_UnapplyAura(AuraApplication* aurApp, AuraRemoveMode removeMode)
@@ -5770,7 +5795,10 @@ void Unit::SetPowerType(Powers new_powertype, bool sendUpdate/* = true*/)
 
 void Unit::UpdateDisplayPower()
 {
-    Powers displayPower = POWER_MANA;
+    // @duskhaven-port
+    int8 power = POWER_MANA;
+    FIRE(Unit, OnUpdateDisplayPower, TSUnit(this), TSMutableNumber<int8>(&power));
+    Powers displayPower = Powers(power);
     switch (GetShapeshiftForm())
     {
         case FORM_GHOUL:
@@ -8891,6 +8919,10 @@ int32 Unit::ModifyPower(Powers power, int32 dVal, bool withPowerUpdate /*= true*
     if (dVal == 0)
         return 0;
 
+    // @duskhaven-port
+    if (Player* player = ToPlayer())
+        FIRE(Player, BeforeModifyPower, TSPlayer(player), TSNumber<uint8>(power), TSMutableNumber<int32>(&dVal));
+
     int32 curPower = (int32)GetPower(power);
 
     int32 val = dVal + curPower;
@@ -10005,6 +10037,10 @@ void Unit::SetPower(Powers power, uint32 val, bool withPowerUpdate /*= true*/, b
     {
         if (player->GetGroup())
             player->SetGroupUpdateFlag(GROUP_UPDATE_FLAG_CUR_POWER);
+
+        // @duskhaven-port
+        FIRE(Player, OnPowerChanged, TSPlayer(player),
+             TSNumber<uint8>(power), TSNumber<uint32>(val), TSNumber<uint32>(maxPower));
     }
     else if (Pet* pet = ToCreature()->ToPet())
     {
@@ -12095,6 +12131,21 @@ void Unit::SetControlled(bool apply, UnitState state)
 
         ApplyControlStatesIfNeeded();
     }
+
+    // @duskhaven-port
+    if (Player* p = ToPlayer())
+    {
+        bool stillLost = p->HasUnitState(UNIT_STATE_STUNNED) || p->HasUnitState(UNIT_STATE_ROOT)
+                       || p->HasUnitState(UNIT_STATE_CONFUSED) || p->HasUnitState(UNIT_STATE_FLEEING);
+        if (stillLost)
+        {
+            FIRE(Player, OnLossOfControl, TSPlayer(p));
+        }
+        else
+        {
+            FIRE(Player, OnControlRegained, TSPlayer(p));
+        }
+    }
 }
 
 void Unit::ApplyControlStatesIfNeeded()
@@ -13017,6 +13068,12 @@ float Unit::MeleeSpellMissChance(Unit const* victim, WeaponAttackType attType, i
         );
     }
     // @tswow-end
+
+    // @duskhaven-port
+    FIRE(Unit, OnCalcMissChanceAgainst,
+         TSUnit(const_cast<Unit*>(this)),
+         TSUnit(const_cast<Unit*>(victim)),
+         TSMutableNumber<float>(&missChance));
 
     return std::max(missChance, 0.f);
 }
