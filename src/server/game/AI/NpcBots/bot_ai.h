@@ -246,6 +246,8 @@ public:
     float GetBGCombatHunger() const { return _bgCombatHunger; }
     // Plan a 3-waypoint bypass route around an obstacle
     bool PlanBGBypass();
+    // Plan a bypass by copying the recent path of an ally who made it past
+    bool PlanBGBypassFromAlly();
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }

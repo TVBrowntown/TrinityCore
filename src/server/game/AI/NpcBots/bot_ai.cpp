@@ -22418,8 +22418,115 @@ Unit* bot_ai::SelectBGHealTarget(std::list<Unit*> const& targets) const
     return bestTarget;
 }
 
+bool bot_ai::PlanBGBypassFromAlly()
+{
+    if (!_bgHasObjective) return false;
+    Battleground* bg = GetBG();
+    if (!bg) return false;
+
+    TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    uint32 myTeamVal = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+
+    float mySx = me->GetPositionX(), mySy = me->GetPositionY();
+    float objDx = _bgObjectivePos.m_positionX - mySx;
+    float objDy = _bgObjectivePos.m_positionY - mySy;
+    float objLen = std::sqrt(objDx * objDx + objDy * objDy);
+    if (objLen < 1.0f) return false;
+    float objDirX = objDx / objLen;
+    float objDirY = objDy / objLen;
+
+    // Find an ally that passed near our position AND is now past us toward the objective
+    bot_ai const* bestAlly = nullptr;
+    float bestAllyProgress = 0.0f;
+    uint8 bestStartIdx = 0xFF;
+
+    for (auto const& [guid, botData] : bg->GetBots())
+    {
+        if (botData.Team != myTeamVal) continue;
+        Creature const* allyC = ObjectAccessor::GetCreature(*me, guid);
+        if (!allyC || !allyC->IsAlive() || allyC == me) continue;
+
+        bot_ai const* allyAI = allyC->GetBotAI();
+        if (!allyAI || !allyAI->IsWanderer()) continue;
+        if (allyAI->_bgPathHistoryCount == 0) continue;
+
+        // Projection of ally's position onto our objective direction (how far "past" us they are)
+        float allyDx = allyC->GetPositionX() - mySx;
+        float allyDy = allyC->GetPositionY() - mySy;
+        float allyProgress = allyDx * objDirX + allyDy * objDirY;
+
+        // Ally must be meaningfully ahead (30yd toward objective)
+        if (allyProgress < 30.0f) continue;
+
+        // Search their path history for a point near our current position
+        for (uint8 i = 0; i < allyAI->_bgPathHistoryCount; ++i)
+        {
+            uint8 idx = (allyAI->_bgPathHistoryHead + bot_ai::BG_PATH_HISTORY_SIZE - 1 - i) % bot_ai::BG_PATH_HISTORY_SIZE;
+            Position const& hp = allyAI->_bgPathHistory[idx];
+            float hpDx = hp.GetPositionX() - mySx;
+            float hpDy = hp.GetPositionY() - mySy;
+            if (hpDx * hpDx + hpDy * hpDy < 20.0f * 20.0f) // within 20yd of us
+            {
+                if (allyProgress > bestAllyProgress)
+                {
+                    bestAlly = allyAI;
+                    bestAllyProgress = allyProgress;
+                    bestStartIdx = idx;
+                }
+                break;
+            }
+        }
+    }
+
+    if (!bestAlly || bestStartIdx == 0xFF)
+        return false;
+
+    // Walk forward in the ally's buffer from bestStartIdx toward most recent
+    // Collect up to 3 waypoints that are ahead of us toward the objective
+    uint8 steps[3] = { 0xFF, 0xFF, 0xFF };
+    uint8 stepCount = 0;
+    uint8 current = bestStartIdx;
+    for (int i = 0; i < bot_ai::BG_PATH_HISTORY_SIZE && stepCount < 3; ++i)
+    {
+        current = (current + 1) % bot_ai::BG_PATH_HISTORY_SIZE;
+        if (current == bestAlly->_bgPathHistoryHead) break; // reached the write head
+
+        // Skip if this position is behind us (not progressing toward objective)
+        Position const& p = bestAlly->_bgPathHistory[current];
+        float pDx = p.GetPositionX() - mySx;
+        float pDy = p.GetPositionY() - mySy;
+        float progress = pDx * objDirX + pDy * objDirY;
+        if (progress < 2.0f) continue; // not meaningfully forward
+
+        steps[stepCount++] = current;
+    }
+
+    if (stepCount == 0) return false;
+
+    // Populate bypass targets, ground-validate each
+    for (uint8 i = 0; i < 3; ++i)
+    {
+        uint8 srcIdx = (i < stepCount) ? steps[i] : steps[stepCount - 1];
+        Position const& p = bestAlly->_bgPathHistory[srcIdx];
+        float wz = p.GetPositionZ();
+        float gx = p.GetPositionX(), gy = p.GetPositionY();
+        me->UpdateGroundPositionZ(gx, gy, wz);
+        if (wz <= INVALID_HEIGHT) wz = p.GetPositionZ();
+        _bgBypassTargets[i].Relocate(gx, gy, wz);
+    }
+
+    _bgBypassStep = 1;
+    _bgBypassCommitTimer = 20000; // 20s — longer because we're following a known-good path
+    _bgObjectivePos.Relocate(_bgBypassTargets[0]);
+    return true;
+}
+
 bool bot_ai::PlanBGBypass()
 {
+    // Try the ally-path-copy approach first — most reliable when allies have made progress
+    if (PlanBGBypassFromAlly())
+        return true;
+
     if (!_bgHasObjective)
         return false;
 
