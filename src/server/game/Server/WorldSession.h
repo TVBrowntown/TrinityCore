@@ -1211,6 +1211,9 @@ class TC_GAME_API WorldSession
         void HandleCustom(WorldPacket& recvPacket);
         // @tswow-end
 
+        // @duskhaven-port - handle custom packets at character select / login queue
+        bool HandleCustomNotInWorld(WorldPacket& recvPacket);
+
     public:
         QueryCallbackProcessor& GetQueryProcessor() { return _queryProcessor; }
         TransactionCallback& AddTransactionCallback(TransactionCallback&& callback);

@@ -23,6 +23,9 @@
 #include "TSPlayer.h"
 #include "TSEvents.h"
 #include "TSCustomPacket.h"
+// @duskhaven-port
+#include "TSGlobal.h"
+#include "Opcodes.h"
 // @tswow-end
 #include "WorldSession.h"
 #include "AccountMgr.h"
@@ -328,6 +331,16 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
                         //! the client to be in world yet. We will re-add the packets to the bottom of the queue and process them later.
                         if (!m_playerRecentlyLogout)
                         {
+                            // @duskhaven-port - route custom packets to the NotInWorld handler
+                            // so scripts can service clients at the character-select screen.
+                            // If the packet isn't a whitelisted custom opcode, fall through
+                            // to the normal requeue path.
+                            if (packet->GetOpcode() == CMSG_CUSTOM
+                                && HandleCustomNotInWorld(*packet))
+                            {
+                                // packet consumed — let default delete path clean it up
+                                break;
+                            }
                             requeuePackets.push_back(packet);
                             deletePacket = false;
                             TC_LOG_DEBUG("network", "Re-enqueueing packet with opcode {} with with status STATUS_LOGGEDIN. "
@@ -1815,6 +1828,28 @@ void WorldSession::HandleCustom(WorldPacket& packet)
         .ReceivePacket(packet.size(),(char*)packet.contents());
 }
 // @tswow-end
+
+// @duskhaven-port
+bool WorldSession::HandleCustomNotInWorld(WorldPacket& packet)
+{
+    TSServerBuffer buffer = TSServerBuffer(GetAccountId());
+    // Parse the fragment but don't fire OnPacket yet - we need to inspect
+    // the decoded opcode first to decide if it's whitelisted.
+    if (buffer.ReceivePacket(packet.size(), (char*)packet.contents(), true)
+        == CustomPacketResult::HANDLED_MESSAGE)
+    {
+        opcode_t opcode = buffer.GetOpcode();
+        auto it = notInWorldCustomOpcodeMap.find(opcode);
+        if (it != notInWorldCustomOpcodeMap.end() && it->second)
+        {
+            buffer.callOnSuccess();
+            return true;
+        }
+    }
+    buffer.clearPacket();
+    return false;
+}
+// @duskhaven-port-end
 
 // AOE Loot helper methods
 void WorldSession::SetVirtualAOELoot(Loot* loot)
