@@ -19329,56 +19329,10 @@ void bot_ai::CommonTimers(uint32 diff)
                 if (curZ < -100.0f)
                     clipped = true;
 
-                // Case 4: Ceiling check — is there static geometry directly above the bot?
-                // If something's 5-30 yards overhead AND we're not in a known indoor area,
-                // we're clipped under a floor/building
-                if (!clipped && !me->IsInWater())
-                {
-                    float ceilHeight = me->GetMap()->GetHeight(me->GetPhaseMask(), curX, curY, curZ + 5.0f, true, 50.0f);
-                    // GetHeight with a start Z above us searches for walkable Z. If it finds one
-                    // significantly higher AND it's a reasonable "floor above us" height (5-40yd),
-                    // we're under geometry.
-                    if (ceilHeight > INVALID_HEIGHT && ceilHeight > curZ + 5.0f && ceilHeight < curZ + 40.0f)
-                    {
-                        // There's a walkable surface between 5-40yd above us
-                        // Bot might legitimately be under a roof — check if they're way below
-                        // the elevation of nearby combatants to distinguish
-                        if (Battleground* bgCheck = GetBG())
-                        {
-                            float avgEnemyZ = 0.0f;
-                            uint32 enemyCount = 0;
-                            TeamId myTId = bgCheck->GetBotTeamId(me->GetGUID());
-                            uint32 myTV = myTId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
-                            for (auto const& [guid, botData] : bgCheck->GetBots())
-                            {
-                                if (botData.Team == myTV) continue;
-                                Creature const* enemy = ObjectAccessor::GetCreature(*me, guid);
-                                if (!enemy || !enemy->IsAlive()) continue;
-                                if (me->GetExactDist2d(enemy) > 40.0f) continue;
-                                avgEnemyZ += enemy->GetPositionZ();
-                                ++enemyCount;
-                            }
-                            if (enemyCount > 0)
-                            {
-                                avgEnemyZ /= float(enemyCount);
-                                // If nearby enemies are >10yd above us, we've clipped below them
-                                if (avgEnemyZ - curZ > 10.0f)
-                                    clipped = true;
-                            }
-                        }
-                    }
-                }
-
-                // Case 5: XY proximity to enemies but dramatic Z mismatch (attacking through wall)
-                if (!clipped && me->IsInCombat() && me->GetVictim())
-                {
-                    Unit* victim = me->GetVictim();
-                    float zDiff = std::abs(me->GetPositionZ() - victim->GetPositionZ());
-                    float xyDist = me->GetExactDist2d(victim);
-                    // Close in XY (<15yd) but >10yd Z difference = shooting through floor/wall
-                    if (xyDist < 15.0f && zDiff > 10.0f)
-                        clipped = true;
-                }
+                // Cases 4 and 5 (ceiling check + combat Z mismatch) disabled —
+                // they false-positive on WSG multi-level combat (flag room upper vs lower,
+                // tunnel ramps) and teleport bots back to spawn during normal fights.
+                // Cases 1-3 still catch actual clip-through-geometry events.
 
                 if (clipped)
                 {
@@ -19724,7 +19678,9 @@ void bot_ai::Evade()
         return;
     if (evadeDelayTimer > lastdiff)
         return;
-    if (me->GetVictim())
+    // BG wanderers: allow objective re-evaluation even while in combat
+    // (world bots still early-return on victim — preserves PvE behavior)
+    if (me->GetVictim() && !(me->GetMap()->IsBattlegroundOrArena() && IsWanderer()))
         return;
     if (IAmFree() && HasBotCommandState(BOT_COMMAND_FOLLOW))
         return;
@@ -19742,6 +19698,17 @@ void bot_ai::Evade()
         _atHome = true;
         _evadeMode = false;
         return;
+    }
+
+    // BG fix: release STAY command if BG has started (was set during prep phase)
+    if (me->GetMap()->IsBattlegroundOrArena() && IsWanderer() &&
+        HasBotCommandState(BOT_COMMAND_STAY))
+    {
+        if (Battleground* bgRel = GetBG())
+        {
+            if (bgRel->GetStatus() == STATUS_IN_PROGRESS)
+                RemoveBotCommandState(BOT_COMMAND_STAY);
+        }
     }
 
     if (HasBotCommandState(BOT_COMMAND_MASK_UNMOVING))
