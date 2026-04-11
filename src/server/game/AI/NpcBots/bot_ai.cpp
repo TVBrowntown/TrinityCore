@@ -22521,12 +22521,75 @@ bool bot_ai::PlanBGBypassFromAlly()
     return true;
 }
 
+bool bot_ai::PlanBGBypassViaGraveyard()
+{
+    if (!_bgHasObjective) return false;
+    Battleground* bg = GetBG();
+    if (!bg) return false;
+
+    // Find the nearest friendly graveyard
+    TeamId myTeamId = bg->GetBotTeamId(me->GetGUID());
+    uint32 myTeamVal = myTeamId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+    WorldSafeLocsEntry const* gy = bg->GetClosestGraveyardForBot(*me, myTeamVal);
+    if (!gy) return false;
+
+    float gyX = gy->Loc.X, gyY = gy->Loc.Y, gyZ = gy->Loc.Z;
+    float gyDist = me->GetExactDist2d(gyX, gyY);
+
+    // Only use this strategy if the graveyard is within a reasonable range (not the entire map)
+    if (gyDist > 120.0f) return false;
+
+    // Validate ground height at graveyard
+    me->UpdateGroundPositionZ(gyX, gyY, gyZ);
+    if (gyZ <= INVALID_HEIGHT) return false;
+
+    // Waypoint 1: the graveyard itself (known-walkable, reachable)
+    _bgBypassTargets[0].Relocate(gyX, gyY, gyZ);
+
+    // Waypoint 2 & 3: step toward the objective from the graveyard position
+    // to resume normal progress after the graveyard bounce
+    float towardX = _bgObjectivePos.m_positionX - gyX;
+    float towardY = _bgObjectivePos.m_positionY - gyY;
+    float towardLen = std::sqrt(towardX * towardX + towardY * towardY);
+    if (towardLen > 1.0f)
+    {
+        float tDirX = towardX / towardLen;
+        float tDirY = towardY / towardLen;
+        float wp2X = gyX + tDirX * 15.0f;
+        float wp2Y = gyY + tDirY * 15.0f;
+        float wp3X = gyX + tDirX * 30.0f;
+        float wp3Y = gyY + tDirY * 30.0f;
+        float wp2Z = gyZ, wp3Z = gyZ;
+        me->UpdateGroundPositionZ(wp2X, wp2Y, wp2Z);
+        if (wp2Z <= INVALID_HEIGHT) wp2Z = gyZ;
+        me->UpdateGroundPositionZ(wp3X, wp3Y, wp3Z);
+        if (wp3Z <= INVALID_HEIGHT) wp3Z = wp2Z;
+        _bgBypassTargets[1].Relocate(wp2X, wp2Y, wp2Z);
+        _bgBypassTargets[2].Relocate(wp3X, wp3Y, wp3Z);
+    }
+    else
+    {
+        _bgBypassTargets[1].Relocate(gyX, gyY, gyZ);
+        _bgBypassTargets[2].Relocate(gyX, gyY, gyZ);
+    }
+
+    _bgBypassStep = 1;
+    _bgBypassCommitTimer = 18000; // 18s — graveyard is a reliable pivot point
+    _bgObjectivePos.Relocate(_bgBypassTargets[0]);
+    return true;
+}
+
 bool bot_ai::PlanBGBypass()
 {
-    // Try the ally-path-copy approach first — most reliable when allies have made progress
+    // Strategy 1: copy the path of an ally who made it past the obstacle
     if (PlanBGBypassFromAlly())
         return true;
 
+    // Strategy 2: bounce via the nearest friendly graveyard (known-walkable pivot)
+    if (PlanBGBypassViaGraveyard())
+        return true;
+
+    // Strategy 3: blind perpendicular sidestep (fallback)
     if (!_bgHasObjective)
         return false;
 

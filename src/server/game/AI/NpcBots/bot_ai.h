@@ -248,6 +248,8 @@ public:
     bool PlanBGBypass();
     // Plan a bypass by copying the recent path of an ally who made it past
     bool PlanBGBypassFromAlly();
+    // Plan a bypass via the nearest friendly graveyard (known-walkable position)
+    bool PlanBGBypassViaGraveyard();
     std::vector<BGQEpisodeStep> const& GetQEpisode() const { return _bgQEpisode; }
     uint32 GetBGObjectiveCaps() const { return _bgObjectiveCapsCount; }
     uint16 GetBGMatchKills() const { return _bgMatchKills; }
