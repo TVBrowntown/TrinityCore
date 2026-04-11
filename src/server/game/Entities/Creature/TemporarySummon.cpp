@@ -287,6 +287,11 @@ void TempSummon::UnSummon(uint32 msTime)
     //ASSERT(!IsPet());
     if (IsPet())
     {
+        // @duskhaven-port
+        if (Unit* owner = GetOwner())
+            if (Player* ownerPlayer = owner->ToPlayer())
+                FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetDespawn,
+                        TSCreature(this), TSPlayer(ownerPlayer));
         ToPet()->Remove(PET_SAVE_NOT_IN_SLOT);
         ASSERT(!IsInWorld());
         return;
@@ -461,6 +466,10 @@ void Guardian::InitSummon()
     {
         GetOwner()->ToPlayer()->CharmSpellInitialize();
     }
+
+    // @duskhaven-port
+    FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetSummoned,
+            TSUnit(GetOwner()), TSCreature(this));
 }
 
 std::string Guardian::GetDebugInfo() const
