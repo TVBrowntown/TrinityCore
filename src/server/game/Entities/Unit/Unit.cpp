@@ -6888,6 +6888,26 @@ uint32 Unit::SpellDamageBonusDone(Unit* victim, SpellInfo const* spellProto, uin
     int32 DoneTotal = 0;
     float DoneTotalMod = donePctTotal ? *donePctTotal : SpellDamagePctDone(victim, spellProto, damagetype);
 
+    // @duskhaven-port
+    if (IsPlayer())
+    {
+        FIRE(Player, OnCustomScriptedDamageDoneMod,
+             TSPlayer(const_cast<Player*>(this->ToPlayer())),
+             TSUnit(const_cast<Unit*>(victim)), TSSpellInfo(spellProto),
+             TSNumber<uint8>(damagetype), TSNumber<uint8>(MAX_ATTACK),
+             TSMutableNumber<float>(&DoneTotalMod),
+             TSMutableNumber<uint32>(&pdamage), false);
+    }
+    else if (IsPet() && GetOwner() && GetOwner()->IsPlayer())
+    {
+        FIRE(Player, OnCustomScriptedDamageDoneMod,
+             TSPlayer(const_cast<Player*>(GetOwner()->ToPlayer())),
+             TSUnit(const_cast<Unit*>(victim)), TSSpellInfo(spellProto),
+             TSNumber<uint8>(damagetype), TSNumber<uint8>(MAX_ATTACK),
+             TSMutableNumber<float>(&DoneTotalMod),
+             TSMutableNumber<uint32>(&pdamage), true);
+    }
+
     // done scripted mod (take it from owner)
     Unit const* owner = GetOwner() ? GetOwner() : this;
     DoneTotal += owner->GetTotalAuraModifier(SPELL_AURA_OVERRIDE_CLASS_SCRIPTS, [spellProto](AuraEffect const* aurEff) -> bool
@@ -7396,6 +7416,15 @@ uint32 Unit::SpellDamageBonusTaken(Unit* caster, SpellInfo const* spellProto, ui
         }
     }
 
+    // @duskhaven-port
+    if (caster && IsPlayer())
+        FIRE(Player, OnCustomScriptedDamageTakenMod,
+             TSPlayer(const_cast<Player*>(this->ToPlayer())),
+             TSUnit(const_cast<Unit*>(caster)), TSSpellInfo(spellProto),
+             TSNumber<uint8>(damagetype), TSNumber<uint8>(MAX_ATTACK),
+             TSMutableNumber<float>(&TakenTotalMod),
+             TSNumber<uint8>(1 << damagetype));
+
     // Sanctified Wrath (bypass damage reduction)
     if (caster && TakenTotalMod < 1.0f)
     {
@@ -7688,6 +7717,13 @@ float Unit::SpellCritChanceTaken(Unit const* caster, SpellInfo const* spellInfo,
                 return true;
             return false;
         });
+
+        // @duskhaven-port
+        if (caster->IsPlayer())
+            FIRE(Player, OnCustomScriptedCritMod,
+                 TSPlayer(const_cast<Player*>(caster->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(this)), TSSpellInfo(spellInfo),
+                 TSMutableNumber<float>(&crit_chance));
     }
 
     //npcbot - apply bot spell crit mods
@@ -7722,6 +7758,13 @@ float Unit::SpellCritChanceTaken(Unit const* caster, SpellInfo const* spellInfo,
 
         if (victim)
             crit_mod += caster->GetTotalAuraModifierByMiscMask(SPELL_AURA_MOD_CRIT_PERCENT_VERSUS, victim->GetCreatureTypeMask());
+
+        // @duskhaven-port
+        if (caster->IsPlayer())
+            FIRE(Player, OnCustomScriptedCritDamageMod,
+                 TSPlayer(const_cast<Player*>(caster->ToPlayer())),
+                 TSUnit(victim), TSSpellInfo(const_cast<SpellInfo*>(spellProto)),
+                 TSMutableNumber<float>(&crit_mod));
 
         if (crit_bonus != 0)
             AddPct(crit_bonus, crit_mod);
@@ -7763,6 +7806,18 @@ float Unit::SpellCritChanceTaken(Unit const* caster, SpellInfo const* spellInfo,
         {
             uint32 creatureTypeMask = victim->GetCreatureTypeMask();
             crit_bonus = int32(crit_bonus * caster->GetTotalAuraMultiplierByMiscMask(SPELL_AURA_MOD_CRIT_PERCENT_VERSUS, creatureTypeMask));
+        }
+
+        // @duskhaven-port
+        if (caster->IsPlayer())
+        {
+            float critHealMod = 0.0f;
+            FIRE(Player, OnCustomScriptedCritHealingMod,
+                 TSPlayer(const_cast<Player*>(caster->ToPlayer())),
+                 TSUnit(victim), TSSpellInfo(const_cast<SpellInfo*>(spellProto)),
+                 TSMutableNumber<float>(&critHealMod));
+            if (critHealMod != 0.0f)
+                AddPct(crit_bonus, critHealMod);
         }
     }
 
@@ -7908,6 +7963,16 @@ uint32 Unit::SpellHealingBonusDone(Unit* victim, SpellInfo const* spellProto, ui
         }
         if (otherSpellEffect.IsEffect(SPELL_EFFECT_HEALTH_LEECH))
             DoneTotal = 0;
+    }
+
+    // @duskhaven-port - allow Player scripts to mod final healing pct
+    {
+        Unit const* healOwner = GetOwner() ? GetOwner() : this;
+        if (healOwner->IsPlayer())
+            FIRE(Player, OnCustomScriptedHealMod,
+                 TSPlayer(const_cast<Player*>(healOwner->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(victim)), TSSpellInfo(spellProto),
+                 TSMutableNumber<float>(&DoneTotalMod));
     }
 
     float heal = float(int32(healamount) + DoneTotal) * DoneTotalMod;
@@ -8468,6 +8533,29 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
         }
     }
 
+    // @duskhaven-port - autoattack hook (spellProto == nullptr) or scripted damage done
+    if (!spellProto)
+    {
+        if (IsPlayer())
+        {
+            FIRE(Player, OnCustomScriptedAutoattackMod,
+                 TSPlayer(const_cast<Player*>(this->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(victim)),
+                 TSMutableNumber<float>(&DoneTotalMod),
+                 TSMutableNumber<uint32>(&pdamage),
+                 TSNumber<uint8>(attType), false);
+        }
+        else if (IsPet() && GetOwner() && GetOwner()->IsPlayer())
+        {
+            FIRE(Player, OnCustomScriptedAutoattackMod,
+                 TSPlayer(const_cast<Player*>(GetOwner()->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(victim)),
+                 TSMutableNumber<float>(&DoneTotalMod),
+                 TSMutableNumber<uint32>(&pdamage),
+                 TSNumber<uint8>(attType), true);
+        }
+    }
+
     float tmpDamage = float(int32(pdamage) + DoneFlatBenefit) * DoneTotalMod;
 
     // bonus result can be negative
@@ -8587,6 +8675,17 @@ uint32 Unit::MeleeDamageBonusTaken(Unit* attacker, uint32 pdamage, WeaponAttackT
         }
 
         TakenTotalMod = 1.0f - damageReduction;
+    }
+
+    // @duskhaven-port - autoattack taken mod (spellProto nullptr) or scripted damage taken
+    if (IsPlayer())
+    {
+        if (!spellProto)
+            FIRE(Player, OnCustomScriptedAutoattackDamageTakenMod,
+                 TSPlayer(const_cast<Player*>(this->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(attacker)),
+                 TSMutableNumber<float>(&TakenTotalMod),
+                 TSMutableNumber<uint32>(&pdamage));
     }
 
     float tmpDamage = float(pdamage + TakenFlatBenefit) * TakenTotalMod;
