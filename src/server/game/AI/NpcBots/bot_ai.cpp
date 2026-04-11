@@ -19337,19 +19337,9 @@ void bot_ai::CommonTimers(uint32 diff)
                 // Also query VMAP-inclusive height (what the visible mesh shows)
                 float mapHeight = me->GetMap()->GetHeight(me->GetPhaseMask(), curX, curY, curZ + 5.0f, true, 50.0f);
 
-                // GENTLE Z CORRECTION: if bot is slightly below visible terrain (0.5 - 3 yards)
-                // silently nudge them back up. This handles MMAP/VMAP vs visible mesh drift.
-                if (expectedGround > INVALID_HEIGHT && !me->isMoving())
-                {
-                    float drift = expectedGround - curZ;
-                    if (drift > 0.5f && drift < 3.0f)
-                    {
-                        // Small correction — quietly update Z
-                        me->Relocate(curX, curY, expectedGround);
-                        me->SendMovementFlagUpdate();
-                        curZ = expectedGround;
-                    }
-                }
+                // DISABLED: gentle Z correction using Relocate was causing bots to end up
+                // at bad positions when UpdateGroundPositionZ returned wrong values.
+                // Removed until a safer correction method is implemented.
 
                 bool clipped = false;
 
@@ -19366,10 +19356,49 @@ void bot_ai::CommonTimers(uint32 diff)
                 if (curZ < -100.0f)
                     clipped = true;
 
-                // Cases 4 and 5 (ceiling check + combat Z mismatch) disabled —
-                // they false-positive on WSG multi-level combat (flag room upper vs lower,
-                // tunnel ramps) and teleport bots back to spawn during normal fights.
-                // Cases 1-3 still catch actual clip-through-geometry events.
+                // Case 4: team-average Z comparison (replaces old enemy-Z case)
+                // If bot is way below their teammates' average Z, they've probably clipped.
+                // Uses TEAM (not enemies) to avoid false positives on multi-level combat —
+                // teammates are mostly on the same level during normal gameplay.
+                if (!clipped)
+                {
+                    if (Battleground* bgCheck = GetBG())
+                    {
+                        float avgAllyZ = 0.0f;
+                        uint32 allyCount = 0;
+                        TeamId myTId = bgCheck->GetBotTeamId(me->GetGUID());
+                        uint32 myTV = myTId == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+                        for (auto const& [guid, botData] : bgCheck->GetBots())
+                        {
+                            if (botData.Team != myTV) continue;
+                            Creature const* ally = ObjectAccessor::GetCreature(*me, guid);
+                            if (!ally || !ally->IsAlive() || ally == me) continue;
+                            if (me->GetExactDist2d(ally) > 80.0f) continue;
+                            avgAllyZ += ally->GetPositionZ();
+                            ++allyCount;
+                        }
+                        // Need at least 2 nearby teammates to make a meaningful comparison
+                        if (allyCount >= 2)
+                        {
+                            avgAllyZ /= float(allyCount);
+                            // If we're >15yd below the nearby team average, we've clipped
+                            if (avgAllyZ - curZ > 15.0f)
+                                clipped = true;
+                        }
+                    }
+                }
+
+                // Case 5: sudden Z drop detection (fell through geometry without jumping/falling)
+                // If the bot's Z dropped by more than 10yd since the last valid position
+                // AND they weren't in a jumping/falling state, they teleported downward
+                if (!clipped && _bgLastValidPos.GetPositionZ() > INVALID_HEIGHT)
+                {
+                    float zDrop = _bgLastValidPos.GetPositionZ() - curZ;
+                    float xyDrift = me->GetExactDist2d(_bgLastValidPos);
+                    // Z dropped >10yd but bot didn't move far horizontally = not a legit jump
+                    if (zDrop > 10.0f && xyDrift < 15.0f)
+                        clipped = true;
+                }
 
                 if (clipped)
                 {
