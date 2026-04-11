@@ -1839,6 +1839,14 @@ bool Guardian::UpdateStats(Stats stat)
     }
 */
 
+    // @duskhaven-port
+    if (m_owner && m_owner->IsPlayer())
+        FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateStat,
+                TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                TSMutableNumber<float>(&value),
+                TSMutableNumber<float>(&ownersBonus),
+                TSNumber<uint32>(stat));
+
     SetStat(stat, int32(value));
     m_statFromOwner[stat] = ownersBonus;
     UpdateStatBuffMod(stat);
@@ -1893,6 +1901,12 @@ void Guardian::UpdateResistances(uint32 school)
         );
         // @tswow-end
 
+        // @duskhaven-port - pet-specific hook with owner
+        if (IsPet() && m_owner && m_owner->IsPlayer())
+            FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateResistance,
+                    TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                    TSMutableNumber<float>(&value), TSNumber<uint32>(school));
+
         SetResistance(SpellSchools(school), int32(value));
     }
     else
@@ -1924,6 +1938,12 @@ void Guardian::UpdateArmor()
         , true
     );
     // @tswow-end
+
+    // @duskhaven-port - pet-specific hook with owner
+    if (IsPet() && m_owner && m_owner->IsPlayer())
+        FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateArmor,
+                TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                TSMutableNumber<float>(&value));
 
     SetArmor(int32(value));
 }
@@ -1960,6 +1980,12 @@ void Guardian::UpdateMaxHealth()
     );
     // @tswow-end
 
+    // @duskhaven-port
+    if (IsPet() && m_owner && m_owner->IsPlayer())
+        FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateMaxHealth,
+                TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                TSMutableNumber<float>(&value));
+
     SetMaxHealth((uint32)value);
 }
 
@@ -1995,6 +2021,12 @@ void Guardian::UpdateMaxPower(Powers power)
         , int8(power)
     );
     // @tswow-end
+
+    // @duskhaven-port
+    if (IsPet() && m_owner && m_owner->IsPlayer())
+        FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateMaxPower,
+                TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                TSMutableNumber<float>(&value), TSNumber<int8>(power));
 
     SetMaxPower(power, uint32(value));
 }
@@ -2094,6 +2126,14 @@ void Guardian::UpdateAttackPowerAndDamage(bool ranged)
     );
     // @tswow-end
 
+    // @duskhaven-port
+    if (IsPet() && owner && owner->IsPlayer())
+        FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateAttackPowerDamage,
+                TSCreature(this), TSPlayer(owner->ToPlayer()),
+                TSMutableNumber<float>(&base_attPower),
+                TSMutableNumber<float>(&attPowerMod),
+                TSMutableNumber<float>(&attPowerMultiplier), ranged);
+
     SetAttackPower(int32(base_attPower));
     SetAttackPowerModPos(int32(attPowerMod));
     SetAttackPowerMultiplier(attPowerMultiplier);
@@ -2189,6 +2229,28 @@ void Guardian::UpdateDamagePhysical(WeaponAttackType attType)
         , uint8(attType)
     );
     // @tswow-end
+
+    // @duskhaven-port
+    if (m_owner && m_owner->IsPlayer())
+    {
+        if (IsPet())
+        {
+            FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnPetUpdateDamagePhysical,
+                    TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                    TSMutableNumber<float>(&mindamage),
+                    TSMutableNumber<float>(&maxdamage),
+                    TSNumber<float>(0.0f), TSNumber<uint8>(attType));
+        }
+        else
+        {
+            // Note: signature takes single mutable float; we pass mindamage.
+            // Scripts can modify maxdamage via a separate hook if needed.
+            FIRE_ID(GetCreatureTemplate()->events.id, Creature, OnGuardianUpdateDamagePhysical,
+                    TSCreature(this), TSPlayer(m_owner->ToPlayer()),
+                    TSMutableNumber<float>(&mindamage),
+                    TSNumber<uint8>(attType));
+        }
+    }
 
     SetStatFloatValue(UNIT_FIELD_MINDAMAGE, mindamage);
     SetStatFloatValue(UNIT_FIELD_MAXDAMAGE, maxdamage);
