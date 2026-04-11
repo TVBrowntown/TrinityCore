@@ -698,20 +698,26 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 break; // FC does nothing else
             }
 
-            // --- GRAB ENEMY FLAG ---
+            // --- GRAB ENEMY FLAG (STRONGLY amplified — this is how you win WSG) ---
             if (!weHaveTheirFlag) // flag is at base or on ground
             {
                 float dist = std::sqrt((enemyFlagX-myX)*(enemyFlagX-myX) + (enemyFlagY-myY)*(enemyFlagY-myY));
                 float distFactor = distancePull(dist, 800.0f);
-                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG) * 0.15f;
-                float score = (0.75f + attackBias + p.aggression * 0.15f + p.objectiveFocus * 0.1f)
+                uint8 alliesGrabbing = CountIntentions(bgInstId, myTeamId, INTENT_ATTACK_FLAG);
+                // Reduced stacking penalty — we WANT groups going for the flag together
+                float stacking = alliesGrabbing * 0.05f;
+                // Base boosted 0.75 → 0.90, stronger personality bonuses
+                float score = (0.90f + attackBias + p.aggression * 0.20f + p.objectiveFocus * 0.15f)
                     * distFactor - stacking + hungerAttackBoost;
-                if (isOpeningRush) score += 0.1f;
+                if (isOpeningRush) score += 0.20f; // was 0.10
+                // Group push bonus: more allies attacking = bigger bonus (coordinated assault)
+                if (alliesGrabbing >= 1) score += 0.15f; // coordinated
+                if (alliesGrabbing >= 2) score += 0.10f; // full group push
                 addCandidate(BG_UTIL_GRAB_ENEMY_FLAG, score,
                     Position(enemyFlagX, enemyFlagY, enemyFlagZ), 1, INTENT_ATTACK_FLAG);
             }
 
-            // --- CHASE ENEMY FC (immediate — enemy has our flag) ---
+            // --- CHASE ENEMY FC (STRONGLY amplified — retrieve our flag) ---
             if (enemyHasOurFlag)
             {
                 Position fcPos(enemyFlagX, enemyFlagY, enemyFlagZ); // fallback
@@ -721,12 +727,14 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
 
                 float dist = me->GetExactDist2d(fcPos);
                 float distFactor = distancePull(dist, 800.0f);
-                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.20f;
-                float score = (0.85f + p.aggression * 0.1f) * distFactor - stacking + hungerAttackBoost;
+                // Reduced stacking — we want MULTIPLE chasers on the FC
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_CHASE_FC) * 0.08f;
+                // Base boosted 0.85 → 0.95
+                float score = (0.95f + p.aggression * 0.15f) * distFactor - stacking + hungerAttackBoost;
                 addCandidate(BG_UTIL_CHASE_ENEMY_FC, score, fcPos, 1, INTENT_CHASE_FC);
             }
 
-            // --- ESCORT FRIENDLY FC ---
+            // --- ESCORT FRIENDLY FC (MASSIVELY amplified — protecting FC = winning) ---
             if (weHaveTheirFlag)
             {
                 Unit* friendlyFC = ObjectAccessor::GetUnit(*me, friendlyFCGuid);
@@ -735,11 +743,16 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                     fcPos.Relocate(friendlyFC->GetPositionX(), friendlyFC->GetPositionY(), friendlyFC->GetPositionZ());
 
                 float dist = me->GetExactDist2d(fcPos);
-                float distFactor = distancePull(dist, 400.0f);
-                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
-                float score = (0.55f + p.groupTendency * 0.15f + p.caution * 0.1f) * distFactor - stacking;
-                // More escorts needed if enemy has our flag too (both flags out)
-                if (enemyHasOurFlag) score += 0.1f;
+                float distFactor = distancePull(dist, 600.0f); // was 400 — escort from further away
+                // Heavily reduced stacking — FCs want MANY escorts, not few
+                float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.06f;
+                // Base boosted 0.55 → 0.88, bigger personality bonuses
+                float score = (0.88f + p.groupTendency * 0.20f + p.caution * 0.10f) * distFactor - stacking;
+                // Both flags out = maximum escort priority (race to cap)
+                if (enemyHasOurFlag) score += 0.10f;
+                // WIN CONDITION: we have their flag and our flag is at base
+                // This is 3 seconds from winning — escort is the highest priority action
+                if (!enemyHasOurFlag) score += 0.15f;
                 addCandidate(BG_UTIL_ESCORT_FRIENDLY_FC, score, fcPos, 1, INTENT_ESCORT_FC);
             }
 
@@ -768,16 +781,18 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
                 }
             }
 
-            // --- PROTECT FC (immediate — our FC is under attack) ---
+            // --- PROTECT FC (MAXIMIZED — peel for our FC under attack) ---
             if (weHaveTheirFlag)
             {
                 Unit* friendlyFC2 = ObjectAccessor::GetUnit(*me, friendlyFCGuid);
                 if (friendlyFC2 && friendlyFC2->IsAlive() && friendlyFC2->IsInCombat())
                 {
                     float dist = me->GetExactDist2d(friendlyFC2);
-                    float distFactor = distancePull(dist, 300.0f);
-                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.2f;
-                    float score = (0.80f + p.groupTendency * 0.1f) * distFactor - stacking;
+                    float distFactor = distancePull(dist, 400.0f); // was 300
+                    // Very low stacking — we want many peelers, not few
+                    float stacking = CountIntentions(bgInstId, myTeamId, INTENT_ESCORT_FC) * 0.05f;
+                    // Base boosted 0.80 → 0.98 — near maximum urgency
+                    float score = (0.98f + p.groupTendency * 0.10f) * distFactor - stacking;
                     addCandidate(BG_UTIL_PROTECT_FC, score,
                         Position(friendlyFC2->GetPositionX(), friendlyFC2->GetPositionY(), friendlyFC2->GetPositionZ()),
                         1, INTENT_ESCORT_FC);
@@ -789,20 +804,21 @@ BGUtilityResult BotBGAIMgr::EvaluateUtilityActions(
             {
                 float stacking = CountIntentions(bgInstId, myTeamId, INTENT_DEFEND_FLAG) * 0.15f;
                 float score = 0.45f + defendBias + p.caution * 0.2f + p.objectiveFocus * 0.1f - stacking - hungerDefendPenalty;
-                // If we have their flag, defending ours is more important (need both for cap)
-                if (weHaveTheirFlag) score += 0.25f;
+                // If we have their flag, defending ours is CRITICAL — enemy can't cap without ours
+                if (weHaveTheirFlag) score += 0.40f; // was 0.25
                 addCandidate(BG_UTIL_DEFEND_OWN_FLAG, score,
                     Position(myFlagX, myFlagY, myFlagZ), 2, INTENT_DEFEND_FLAG);
             }
 
-            // --- FIGHT MIDFIELD (always available, low priority — never overtakes objectives) ---
+            // --- FIGHT MIDFIELD (lowest priority — bots should ALWAYS prefer flag work) ---
             {
                 float score = 0.25f + p.aggression * 0.2f - p.objectiveFocus * 0.15f + hungerFightBoost;
                 if (isOpeningRush) score += 0.15f;
-                // When team is winning, midfield fighting is even less valuable — push the flag
-                float midCap = (momentum >= BG_MOMENTUM_DOMINATING) ? 0.40f
-                             : (momentum >= BG_MOMENTUM_ADVANTAGE) ? 0.55f
-                             : 0.65f;
+                // Hard-capped to always lose to even the weakest flag action
+                // WSG is won by flag caps, not kills — midfield loitering is strictly bad
+                float midCap = (momentum >= BG_MOMENTUM_DOMINATING) ? 0.30f
+                             : (momentum >= BG_MOMENTUM_ADVANTAGE) ? 0.40f
+                             : 0.50f;
                 score = std::min(score, midCap);
                 addCandidate(BG_UTIL_FIGHT_MIDFIELD, score,
                     Position(MID_X, MID_Y, MID_Z), 1, INTENT_ROAM);
