@@ -6846,6 +6846,11 @@ void Unit::EnergizeBySpell(Unit* victim, uint32 spellId, int32 damage, Powers po
 
 void Unit::EnergizeBySpell(Unit* victim, SpellInfo const* spellInfo, int32 damage, Powers powerType)
 {
+    // @duskhaven-port
+    FIRE_ID(spellInfo->events.id, Spell, OnEnergizeBySpell,
+            TSUnit(victim), TSSpellInfo(spellInfo),
+            TSNumber<uint8>(powerType), TSMutableNumber<int32>(&damage));
+
     victim->ModifyPower(powerType, damage, false);
     victim->GetThreatManager().ForwardThreatForAssistingMe(this, float(damage)/2, spellInfo, true);
     SendEnergizeSpellLog(victim, spellInfo->Id, damage, powerType);

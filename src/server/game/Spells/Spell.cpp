@@ -2601,6 +2601,10 @@ void Spell::TargetInfo::DoDamageAndTriggers(Spell* spell)
             else
                 hitMask |= PROC_HIT_NORMAL;
 
+            // @duskhaven-port
+            FIRE_ID(spell->m_spellInfo->events.id, Spell, OnHeal,
+                    TSUnit(caster), TSUnit(spell->unitTarget), TSMutableNumber<uint32>(&addhealth));
+
             healInfo = std::make_unique<HealInfo>(caster, spell->unitTarget, addhealth, spell->m_spellInfo, spell->m_spellInfo->GetSchoolMask());
             caster->HealBySpell(*healInfo, IsCrit);
             spell->unitTarget->GetThreatManager().ForwardThreatForAssistingMe(caster, float(healInfo->GetEffectiveHeal()) * 0.5f, spell->m_spellInfo);
@@ -3320,6 +3324,8 @@ SpellCastResult Spell::prepare(SpellCastTargets const& targets, AuraEffect const
     {
         if (Unit* unitCaster = m_caster->ToUnit())
         {
+            // @duskhaven-port
+            FIRE_ID(m_spellInfo->events.id, Spell, OnPrepared, TSSpell(this), unitCaster->HasStealthAura());
             // stealth must be removed at cast starting (at show channel bar)
             // skip triggered spell (item equip spell casting and other not explicit character casts/item uses)
             if (!(_triggeredCastFlags & TRIGGERED_IGNORE_AURA_INTERRUPT_FLAGS) && m_spellInfo->IsBreakingStealth())
@@ -3390,6 +3396,16 @@ void Spell::cancel(SpellCastResult result /*= SPELL_FAILED_INTERRUPTED*/, Option
             break;
         default:
             break;
+    }
+
+    // @duskhaven-port
+    if (m_caster->IsUnit() && unitTarget)
+    {
+        FIRE_ID(GetSpellInfo()->events.id, Spell, OnCastCancelled,
+                TSUnit(static_cast<Unit*>(m_caster->ToUnit())),
+                TSUnit(unitTarget), TSSpell(this),
+                TSNumber<int32>(m_timer),
+                TSNumber<int32>(m_channeledDuration > 0 ? m_channeledDuration : GetSpellInfo()->GetDuration()));
     }
 
     SetReferencedFromCurrent(false);
@@ -3708,6 +3724,12 @@ void Spell::_cast(bool skipCheck)
     {
         FIRE_ID(caster->GetCreatureTemplate()->events.id,Creature,OnSpellCastFinished,TSCreature(caster),GetSpellInfo(),SPELL_FINISHED_SUCCESSFUL_CAST);
     }
+
+    // @duskhaven-port
+    if (!m_spellInfo->IsChanneled())
+        if (Unit* caster = m_originalCaster->ToUnit())
+            FIRE_ID(m_spellInfo->events.id, Spell, OnSpellCastFinished,
+                    TSSpell(this), TSUnit(caster), TSNumber<uint32>(SPELL_FINISHED_SUCCESSFUL_CAST));
     // @tswow-end
 
     // Call CreatureAI hook OnSpellCast
@@ -4024,6 +4046,10 @@ void Spell::update(uint32 difftime)
                 {
                     FIRE_ID(caster->GetCreatureTemplate()->events.id,Creature,OnSpellCastFinished,TSCreature(caster),TSSpellInfo(m_spellInfo),SPELL_FINISHED_CHANNELING_COMPLETE);
                 }
+                // @duskhaven-port
+                if (Unit* caster = m_originalCaster->ToUnit())
+                    FIRE_ID(m_spellInfo->events.id, Spell, OnSpellCastFinished,
+                            TSSpell(this), TSUnit(caster), TSNumber<uint32>(SPELL_FINISHED_CHANNELING_COMPLETE));
                 // @tswow-end
 
                 // We call the hook here instead of in Spell::finish because we only want to call it for completed channeling. Everything else is handled by interrupts
@@ -5016,6 +5042,11 @@ void Spell::TakePower()
 
     unitCaster->ModifyPower(powerType, -m_powerCost);
 
+    // @duskhaven-port
+    if (Player* playerCaster = unitCaster->ToPlayer())
+        FIRE(Player, OnPowerSpent, TSPlayer(playerCaster),
+             TSNumber<uint8>(powerType), TSNumber<int32>(m_powerCost));
+
     // Set the five second timer
     if (powerType == POWER_MANA && m_powerCost > 0)
         unitCaster->SetLastManaUse(GameTime::GetGameTimeMS());
@@ -5192,8 +5223,21 @@ void Spell::TakeRunePower(bool didHit)
 
     // you can gain some runic power when use runes
     if (didHit)
+    {
+        // @duskhaven-port
+        FIRE(Player, OnRunesSpent, TSPlayer(player),
+             TSNumber<uint8>(runeCostData->RuneCost[RUNE_BLOOD] + runeCostData->RuneCost[RUNE_UNHOLY] + runeCostData->RuneCost[RUNE_FROST]));
+
         if (int32 rp = int32(runeCostData->RunicPower * sWorld->getRate(RATE_POWER_RUNICPOWER_INCOME)))
+        {
+            // @duskhaven-port
+            if (Unit* target = m_targets.GetUnitTarget())
+                FIRE(Player, OnRunicGainedFromSpell, TSSpell(this), TSPlayer(player),
+                     TSUnit(target), TSMutableNumber<int32>(&rp));
+
             player->ModifyPower(POWER_RUNIC_POWER, int32(rp));
+        }
+    }
 }
 
 void Spell::TakeReagents()
@@ -6639,8 +6683,16 @@ SpellCastResult Spell::CheckMovement() const
                 return SPELL_FAILED_MOVING;
     }
     else if (getState() == SPELL_STATE_CASTING)
-        if (!m_spellInfo->IsMoveAllowedChannel())
+    {
+        // @duskhaven-port
+        bool isAble = m_spellInfo->IsMoveAllowedChannel();
+        FIRE_ID(m_spellInfo->events.id, Spell, CanMoveWhileChanneling,
+                TSSpell(const_cast<Spell*>(this)),
+                TSUnit(m_caster->ToUnit()),
+                TSMutable<bool, bool>(&isAble));
+        if (!isAble)
             return SPELL_FAILED_MOVING;
+    }
 
     return SPELL_CAST_OK;
 }
@@ -8635,6 +8687,11 @@ void Spell::TriggerGlobalCooldown()
 
     if (!m_spellInfo->StartRecoveryCategory)
         return;
+
+    // @duskhaven-port
+    uint32 category = m_spellInfo->StartRecoveryCategory;
+    FIRE_ID(m_spellInfo->events.id, Spell, OnCheckGCDCategory,
+            TSSpell(this), TSMutableNumber<uint32>(&category));
 
     if (m_caster->GetTypeId() == TYPEID_PLAYER)
         if (m_caster->ToPlayer()->GetCommandStatus(CHEAT_COOLDOWN))
