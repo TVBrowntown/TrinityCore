@@ -1778,6 +1778,12 @@ void Unit::HandleEmoteCommand(Emote emoteId)
                 return aurEff->GetSpellInfo()->IsItemFitToSpellRequirements(weapon);
             });
 
+            // @duskhaven-port
+            FIRE(Player, ScriptedArmorPenMod,
+                 TSPlayer(const_cast<Player*>(attacker->ToPlayer())),
+                 TSUnit(const_cast<Unit*>(victim)),
+                 TSMutableNumber<float>(&arpPct));
+
             // no more than 100%
             RoundToInterval(arpPct, 0.f, 100.f);
 
@@ -2579,6 +2585,14 @@ void Unit::SendMeleeAttackStop(Unit* victim)
 
 bool Unit::IsBlockCritical()
 {
+    // @duskhaven-port - let Player scripts override block crit outcome
+    if (Player* player = ToPlayer())
+    {
+        bool isCritical = false;
+        FIRE(Player, IsCriticalBlock, TSPlayer(player),
+             TSMutable<bool, bool>(&isCritical), false);
+        return isCritical;
+    }
     if (roll_chance_i(GetTotalAuraModifier(SPELL_AURA_MOD_BLOCK_CRIT_CHANCE)))
         return true;
     return false;
@@ -7321,8 +7335,15 @@ uint32 Unit::SpellDamageBonusTaken(Unit* caster, SpellInfo const* spellProto, ui
 
     float TakenTotalMod = 1.0f;
 
+    // @duskhaven-port
+    uint32 mechanicMask = spellProto->GetAllEffectsMechanicMask();
+    if (IsPlayer())
+        FIRE_ID(spellProto->events.id, Spell, OnCustomMechanicMaskDamage,
+                TSUnit(const_cast<Unit*>(this)), TSSpellInfo(spellProto),
+                TSMutableNumber<uint32>(&mechanicMask));
+
     // Mod damage from spell mechanic
-    if (uint32 mechanicMask = spellProto->GetAllEffectsMechanicMask())
+    if (mechanicMask)
     {
         TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_MECHANIC_DAMAGE_TAKEN_PERCENT, [mechanicMask](AuraEffect const* aurEff) -> bool
         {
@@ -8498,6 +8519,12 @@ uint32 Unit::MeleeDamageBonusTaken(Unit* attacker, uint32 pdamage, WeaponAttackT
         // Shred, Maul - "Effects which increase Bleed damage also increase Shred damage"
         if (spellProto->SpellFamilyName == SPELLFAMILY_DRUID && spellProto->SpellFamilyFlags[0] & 0x00008800)
             mechanicMask |= (1 << MECHANIC_BLEED);
+
+        // @duskhaven-port
+        if (attacker->IsPlayer())
+            FIRE_ID(spellProto->events.id, Spell, OnCustomMechanicMaskDamage,
+                    TSUnit(const_cast<Unit*>(attacker)), TSSpellInfo(spellProto),
+                    TSMutableNumber<uint32>(&mechanicMask));
 
         if (mechanicMask)
         {
