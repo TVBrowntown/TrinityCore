@@ -2752,6 +2752,10 @@ void Spell::EffectDispel()
         dataSuccess << uint32(itr->GetAura()->GetId());         // Spell Id
         dataSuccess << uint8(0);                                // 0 - dispelled !=0 cleansed
         unitTarget->RemoveAurasDueToSpellByDispel(itr->GetAura()->GetId(), m_spellInfo->Id, itr->GetAura()->GetCasterGUID(), m_caster, itr->GetDispelCharges());
+
+        // @duskhaven-port - match existing OnSuccessfulDispel signature (TSSpell, dispelType)
+        FIRE_ID(m_spellInfo->events.id, Spell, OnSuccessfulDispel,
+                TSSpell(this), TSNumber<uint32>(dispel_type));
     }
     m_caster->SendMessageToSet(&dataSuccess, true);
 
@@ -3190,6 +3194,9 @@ void Spell::EffectEnchantItemTmp()
 
     // add new enchanting if equipped
     item_owner->ApplyEnchantment(itemTarget, TEMP_ENCHANTMENT_SLOT, true);
+
+    // @duskhaven-port
+    FIRE(Player, OnTempEnchant, TSPlayer(item_owner), TSNumber<uint32>(enchant_id));
 }
 
 void Spell::EffectTameCreature()
@@ -3779,6 +3786,18 @@ void Spell::EffectInterruptCast()
                 }
                 ExecuteLogEffectInterruptCast(effectInfo->EffectIndex, unitTarget, curSpellInfo->Id);
                 unitTarget->InterruptSpell(CurrentSpellTypes(i), false, false, SPELL_FAILED_INTERRUPTED_COMBAT, SPELL_FAILED_DONT_REPORT);
+
+                // @duskhaven-port
+                if (m_caster->IsPlayer())
+                    FIRE(Player, OnSuccessfulInterrupt,
+                         TSPlayer(const_cast<Player*>(m_caster->ToPlayer())),
+                         TSUnit(const_cast<Unit*>(unitTarget)),
+                         TSSpell(const_cast<Spell*>(spell)));
+
+                FIRE_ID(GetSpellInfo()->events.id, Spell, OnSuccessfulInterrupt,
+                        TSUnit(GetUnitCasterForEffectHandlers()),
+                        TSUnit(const_cast<Unit*>(unitTarget)),
+                        TSSpell(const_cast<Spell*>(spell)));
             }
         }
     }
@@ -4030,6 +4049,10 @@ void Spell::EffectAddComboPoints()
 
     if (damage <= 0)
         return;
+
+    // @duskhaven-port
+    if (Player* comboCaster = m_caster->ToPlayer())
+        FIRE(Player, GainComboPoint, TSPlayer(comboCaster), TSNumber<int8>(damage));
 
     AddComboPointGain(unitTarget, damage);
 }
