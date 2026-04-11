@@ -19214,6 +19214,43 @@ void bot_ai::CommonTimers(uint32 diff)
         if (_bgKiteTimer > diff) _bgKiteTimer -= diff; else _bgKiteTimer = 0;
         if (_bgStrafeTimer > diff) _bgStrafeTimer -= diff; else _bgStrafeTimer = 0;
 
+        // BG objective re-evaluation during combat: the Evade() PF pipeline only runs
+        // when !isMoving(), which never happens during MoveChase combat. So we need
+        // to re-evaluate objectives here in the always-on update tick. If the new
+        // objective is significantly different from current position's context,
+        // break off combat to pursue it.
+        if (IsWanderer() && me->GetMap()->IsBattlegroundOrArena() && !IsCasting())
+        {
+            Battleground* bgCombatEval = GetBG();
+            if (bgCombatEval && bgCombatEval->GetStatus() == STATUS_IN_PROGRESS &&
+                me->GetVictim() && _bgBypassCommitTimer == 0)
+            {
+                // Only try to break off if we're not near the enemy we're fighting
+                // (don't abandon mid-swing) and we have an objective
+                Unit* curVictim = me->GetVictim();
+                float victimDist = me->GetExactDist2d(curVictim);
+
+                // Re-evaluate objective (this is throttled by reaction delay internally)
+                GetNextBGTravelNodeWithIntelligence();
+
+                if (_bgHasObjective)
+                {
+                    float objDist = me->GetExactDist2d(_bgObjectivePos);
+                    // Break off combat to pursue objective if:
+                    // 1. Objective is meaningfully close (within 100yd — worth going to now)
+                    // 2. The current victim is further than the objective
+                    // 3. We're not carrying the flag (FC should never drop victim for objective)
+                    if (objDist < 100.0f && objDist < victimDist && !IsFlagCarrier(me))
+                    {
+                        // Break off combat — PF pipeline will take over next Evade tick
+                        me->AttackStop();
+                        me->GetMotionMaster()->Clear();
+                        // Don't CombatStop — still in combat state, just no current target
+                    }
+                }
+            }
+        }
+
         // Bypass commitment: tick down, advance step when current waypoint reached
         if (_bgBypassCommitTimer > 0)
         {
