@@ -5476,8 +5476,13 @@ float Player::GetMeleeCritFromAgility() const
     if (critBase == nullptr || critRatio == nullptr)
         return 0.0f;
 
-    float crit = critBase->Data + GetStat(STAT_AGILITY)*critRatio->Data;
-    return crit*100.0f;
+    float crit = (critBase->Data + GetStat(STAT_AGILITY) * critRatio->Data) * 100.0f;
+    // @duskhaven-port
+    FIRE(Player, OnCalcAgilityCritBonus,
+         TSPlayer(const_cast<Player*>(this)),
+         TSMutableNumber<float>(&crit),
+         TSNumber<float>(GetStat(STAT_AGILITY)));
+    return crit;
 }
 
 // @tswow-begin move dodge_base/crit_to_doge values to global scope and remove const
@@ -5543,6 +5548,19 @@ void Player::GetDodgeFromAgility(float &diminishing, float &nondiminishing) cons
     // calculate diminishing (green in char screen) and non-diminishing (white) contribution
     diminishing = 100.0f * bonus_agility * dodgeRatio->Data * crit_to_dodge[pclass-1];
     nondiminishing = 100.0f * (dodge_base[pclass-1] + base_agility * dodgeRatio->Data * crit_to_dodge[pclass-1]);
+
+    // @duskhaven-port - let scripts override dodge from agility (pass sum, split back)
+    float total = diminishing + nondiminishing;
+    FIRE(Player, OnCalcDodgeFromAgility,
+         TSPlayer(const_cast<Player*>(this)),
+         TSMutableNumber<float>(&total));
+    // preserve original ratio if scripts touched the value
+    if (total != diminishing + nondiminishing && (diminishing + nondiminishing) > 0.0001f)
+    {
+        float ratio = diminishing / (diminishing + nondiminishing);
+        diminishing = total * ratio;
+        nondiminishing = total * (1.0f - ratio);
+    }
 }
 
 float Player::GetSpellCritFromIntellect() const
@@ -5558,8 +5576,12 @@ float Player::GetSpellCritFromIntellect() const
     if (critBase == nullptr || critRatio == nullptr)
         return 0.0f;
 
-    float crit = critBase->Data + GetStat(STAT_INTELLECT) * critRatio->Data;
-    return crit * 100.0f;
+    float crit = (critBase->Data + GetStat(STAT_INTELLECT) * critRatio->Data) * 100.0f;
+    // @duskhaven-port
+    FIRE(Player, OnCalcIntellectCritBonus,
+         TSPlayer(const_cast<Player*>(this)),
+         TSMutableNumber<float>(&crit));
+    return crit;
 }
 
 float Player::GetRatingMultiplier(CombatRating cr) const

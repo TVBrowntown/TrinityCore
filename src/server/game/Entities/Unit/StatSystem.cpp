@@ -219,6 +219,10 @@ bool Player::UpdateStats(Stats stat)
         value = static_cast<float>(GetStatOverride(stat));
     // @tswow-end
 
+    // @duskhaven-port - let scripts override final stat value
+    FIRE(Player, OnUpdateStats, TSPlayer(this),
+         TSMutableNumber<float>(&value), TSNumber<uint32>(stat));
+
     SetStat(stat, int32(value));
 
     if (stat == STAT_STAMINA || stat == STAT_INTELLECT || stat == STAT_STRENGTH)
@@ -309,8 +313,10 @@ void Player::UpdateSpellDamageAndHealingBonus()
     int32 healingBonus = SpellBaseHealingBonusDone(SPELL_SCHOOL_MASK_ALL);
     if (HasHealingPowerOverride())
         healingBonus = GetHealingPowerOverride();
-    SetStatInt32Value(PLAYER_FIELD_MOD_HEALING_DONE_POS, healingBonus);
     // @tswow-end
+    // @duskhaven-port - script hook for final spell healing
+    FIRE(Player, OnUpdateSpellHealing, TSPlayer(this), TSMutableNumber<int32>(&healingBonus));
+    SetStatInt32Value(PLAYER_FIELD_MOD_HEALING_DONE_POS, healingBonus);
     // Get damage bonus for all schools
     Unit::AuraEffectList const& modDamageAuras = GetAuraEffectsByType(SPELL_AURA_MOD_DAMAGE_DONE);
     for (uint16 i = SPELL_SCHOOL_HOLY; i < MAX_SPELL_SCHOOL; ++i)
@@ -325,8 +331,11 @@ void Player::UpdateSpellDamageAndHealingBonus()
         int32 spellDamage = SpellBaseDamageBonusDone(SpellSchoolMask(1 << i)) - GetInt32Value(PLAYER_FIELD_MOD_DAMAGE_DONE_NEG + i);
         if (HasSpellPowerOverride())
             spellDamage = GetSpellPowerOverride();
-        SetStatInt32Value(PLAYER_FIELD_MOD_DAMAGE_DONE_POS + i, spellDamage);
         // @tswow-end
+        // @duskhaven-port - script hook for per-school spell damage
+        FIRE(Player, OnUpdateSpellDamage, TSPlayer(this),
+             TSMutableNumber<int32>(&spellDamage), TSNumber<uint8>(1 << i));
+        SetStatInt32Value(PLAYER_FIELD_MOD_DAMAGE_DONE_POS + i, spellDamage);
     }
 }
 
