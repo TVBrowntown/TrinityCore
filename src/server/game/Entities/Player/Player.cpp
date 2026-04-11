@@ -2147,6 +2147,10 @@ void Player::Regenerate(Powers power)
     uint32 curValue = GetPower(power);
     float addvalue  = GetPowerRegen(power) * 0.001f * m_regenTimer;
 
+    // @duskhaven-port
+    if (power == POWER_ENERGY || power == POWER_FOCUS)
+        FIRE(Player, ScaleRegenByHaste, TSPlayer(this), TSMutableNumber<float>(&addvalue));
+
     if (addvalue < 0.0f)
     {
         if (curValue == 0)
@@ -5446,7 +5450,16 @@ float Player::GetTotalBaseModValue(BaseModGroup modGroup) const
 
 uint32 Player::GetShieldBlockValue() const
 {
-    float value = std::max(0.f, (m_auraBaseFlatMod[SHIELD_BLOCK_VALUE] + GetStat(STAT_STRENGTH) * 0.5f - 10) * m_auraBasePctMod[SHIELD_BLOCK_VALUE]);
+    // @duskhaven-port split: allow scripts to override flat and pct block value pieces
+    float flat = m_auraBaseFlatMod[SHIELD_BLOCK_VALUE] + GetStat(STAT_STRENGTH) * 0.5f - 10;
+    FIRE(Player, OnCalcBlockValueFlat,
+         TSPlayer(const_cast<Player*>(this)),
+         TSMutableNumber<float>(&flat));
+    float pct = m_auraBasePctMod[SHIELD_BLOCK_VALUE];
+    FIRE(Player, OnCalcBlockValuePctMod,
+         TSPlayer(const_cast<Player*>(this)),
+         TSMutableNumber<float>(&pct));
+    float value = std::max(0.f, flat * pct);
     return uint32(value);
 }
 
@@ -6475,6 +6488,10 @@ ActionButton* Player::addActionButton(uint8 button, uint32 action, uint8 type)
     // set data and update to CHANGED if not NEW
     ab.SetActionAndType(action, ActionButtonType(type));
 
+    // @duskhaven-port
+    FIRE(Player, OnActionButtonSet, TSPlayer(this),
+         TSNumber<uint8>(button), TSNumber<uint32>(action), TSNumber<uint8>(type));
+
     TC_LOG_DEBUG("entities.player", "Player::AddActionButton: Player '{}' ({}) added action '{}' (type {}) to button '{}'",
         GetName(), GetGUID().ToString(), action, type, button);
     return &ab;
@@ -6485,6 +6502,12 @@ void Player::removeActionButton(uint8 button)
     ActionButtonList::iterator buttonItr = m_actionButtons.find(button);
     if (buttonItr == m_actionButtons.end() || buttonItr->second.uState == ACTIONBUTTON_DELETED)
         return;
+
+    // @duskhaven-port
+    FIRE(Player, OnActionButtonDelete, TSPlayer(this),
+         TSNumber<uint8>(button),
+         TSNumber<uint32>(buttonItr->second.GetAction()),
+         TSNumber<uint8>(buttonItr->second.GetType()));
 
     if (buttonItr->second.uState == ACTIONBUTTON_NEW)
         m_actionButtons.erase(buttonItr);                   // new and not saved
@@ -8287,6 +8310,9 @@ void Player::CastItemCombatSpell(DamageInfo const& damageInfo, Item* item, ItemT
                             args.AddSpellMod(static_cast<SpellValueMod>(SPELLVALUE_BASE_POINT0 + AsUnderlyingType(spellEffectInfo.EffectIndex)), CalculatePct(spellEffectInfo.CalcValue(this), effectPct));
                 }
                 CastSpell(target, spellInfo->Id, args);
+
+                // @duskhaven-port
+                FIRE(Player, OnEnchantTriggered, TSPlayer(this), TSUnit(target), TSItem(item), TSSpellInfo(spellInfo));
             }
         }
     }
@@ -12578,6 +12604,15 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
     if (slot == EQUIPMENT_SLOT_MAINHAND || slot == EQUIPMENT_SLOT_OFFHAND)
         CheckTitanGripPenalty();
 
+    // @duskhaven-port
+    if (ItemTemplate const* equipProto = pItem->GetTemplate())
+    {
+        if (slot == EQUIPMENT_SLOT_MAINHAND && equipProto->Class == ITEM_CLASS_WEAPON)
+            FIRE(Player, OnEquipMainhandWeapon, TSPlayer(this), TSItem(pItem));
+        if (slot == EQUIPMENT_SLOT_OFFHAND && equipProto->Class == ITEM_CLASS_WEAPON)
+            FIRE(Player, OnEquipOffhandWeapon, TSPlayer(this), TSItem(pItem));
+    }
+
     // only for full equip instead adding to stack
     UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_ITEM, pItem->GetEntry());
     UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_EQUIP_EPIC_ITEM, slot, pItem->GetEntry());
@@ -12731,6 +12766,12 @@ void Player::RemoveItem(uint8 bag, uint8 slot, bool update)
                             break;
                     }
                 }
+
+                // @duskhaven-port
+                if (slot == EQUIPMENT_SLOT_MAINHAND && pProto->Class == ITEM_CLASS_WEAPON)
+                    FIRE(Player, OnUnequipMainhandWeapon, TSPlayer(this), TSItem(pItem));
+                if (slot == EQUIPMENT_SLOT_OFFHAND && pProto->Class == ITEM_CLASS_WEAPON)
+                    FIRE(Player, OnUnequipOffhandWeapon, TSPlayer(this), TSItem(pItem));
             }
 
             m_items[slot] = nullptr;
@@ -15595,6 +15636,9 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
                 if (CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, quest->RewardItemIdCount[i]) == EQUIP_ERR_OK)
                 {
                     Item* item = StoreNewItem(dest, itemId, true, GenerateItemRandomPropertyId(itemId));
+                    // @duskhaven-port
+                    FIRE_ID(quest->events.id, Quest, OnQuestRewardItem,
+                            TSQuest(quest), TSPlayer(this), TSItem(item));
                     SendNewItem(item, quest->RewardItemIdCount[i], true, false, false, false);
                 }
                 else if (quest->IsDFQuest())
@@ -15611,6 +15655,9 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
             if (CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, itemId, quest->RewardChoiceItemCount[reward]) == EQUIP_ERR_OK)
             {
                 Item* item = StoreNewItem(dest, itemId, true, GenerateItemRandomPropertyId(itemId));
+                // @duskhaven-port
+                FIRE_ID(quest->events.id, Quest, OnQuestRewardItem,
+                        TSQuest(quest), TSPlayer(this), TSItem(item));
                 SendNewItem(item, quest->RewardChoiceItemCount[reward], true, false, false, false);
             }
         }
@@ -15639,6 +15686,9 @@ void Player::RewardQuest(Quest const* quest, uint32 reward, Object* questGiver, 
 
     if (!IsMaxLevel())
         GiveXP(XP, nullptr);
+    else
+        // @duskhaven-port
+        FIRE(Player, CompletedQuestAtMaxLevel, TSQuest(quest), TSPlayer(this));
 
     // Give player extra money if GetRewOrReqMoney > 0 and get ReqMoney if negative
     if (int32 moneyRew = quest->GetRewOrReqMoney(this))
@@ -21176,6 +21226,9 @@ void Player::RemovePet(Pet* pet, PetSaveMode mode, bool returnreagent)
 
     SetMinion(pet, false);
 
+    // @duskhaven-port
+    FIRE_ID(pet->GetCreatureTemplate()->events.id, Creature, OnPetDespawn, TSCreature(pet), TSPlayer(this));
+
     pet->AddObjectToRemoveList();
     pet->m_removed = true;
 
@@ -21384,6 +21437,9 @@ void Player::PetSpellInitialize()
         return;
 
     CharmInfo* charmInfo = pet->GetCharmInfo();
+
+    // @duskhaven-port
+    FIRE_ID(pet->GetCreatureTemplate()->events.id, Creature, InitPetSpells, TSCreature(pet), TSPlayer(this));
 
     WorldPacket data(SMSG_PET_SPELLS, 8+2+4+4+4*MAX_UNIT_ACTION_BAR_INDEX+1+1);
     data << uint64(pet->GetGUID());
@@ -25761,6 +25817,9 @@ void Player::HandleFall(MovementInfo const& movementInfo)
                 // Gust of Wind
                 if (HasAura(43621))
                     damage = GetMaxHealth()/2;
+
+                // @duskhaven-port
+                FIRE(Player, OnCalcFallDamage, TSPlayer(this), TSMutableNumber<uint32>(&damage));
 
                 uint32 original_health = GetHealth();
                 uint32 final_damage = EnvironmentalDamage(DAMAGE_FALL, damage);
