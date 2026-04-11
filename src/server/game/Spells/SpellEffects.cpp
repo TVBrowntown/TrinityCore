@@ -1235,6 +1235,16 @@ void Spell::EffectJumpDest()
 
     float speedXY, speedZ;
     CalculateJumpSpeeds(*effectInfo, unitCaster->GetExactDist2d(destTarget), speedXY, speedZ);
+    // @duskhaven-port
+    if (unitTarget && destTarget)
+        FIRE_ID(GetSpellInfo()->events.id, Spell, OnJumpStart,
+                TSSpellInfo(GetSpellInfo()), TSUnit(unitCaster),
+                TSMutableNumber<float>(&speedXY),
+                TSMutableNumber<float>(&speedZ),
+                TSNumber<float>(unitCaster->GetExactDist(unitTarget->GetPosition())),
+                TSNumber<float>(destTarget->GetPositionX()),
+                TSNumber<float>(destTarget->GetPositionY()),
+                TSNumber<float>(destTarget->GetPositionZ()));
     unitCaster->GetMotionMaster()->MoveJump(*destTarget, speedXY, speedZ, EVENT_JUMP, !m_targets.GetObjectTargetGUID().IsEmpty());
 }
 
@@ -1813,6 +1823,10 @@ void Spell::DoCreateItem(uint32 itemId)
         // set the "Crafted by ..." property of the item
         if (pItem->GetTemplate()->HasSignature())
             pItem->SetGuidValue(ITEM_FIELD_CREATOR, player->GetGUID());
+
+        // @duskhaven-port
+        FIRE_ID(pItem->GetTemplate()->events.id, Item, OnItemCrafted,
+                TSItem(pItem), TSPlayer(player), TSNumber<uint32>(num_to_add));
 
         // send info to the client
         player->SendNewItem(pItem, num_to_add, true, bgType == 0);
