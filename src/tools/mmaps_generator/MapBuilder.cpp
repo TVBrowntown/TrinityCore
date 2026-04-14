@@ -422,7 +422,9 @@ namespace MMAP
             data.solidTris.append(inds[i]);
         delete[] inds;
 
-        TerrainBuilder::cleanVertices(data.solidVerts, data.solidTris);
+        char cleanContext[128];
+        sprintf(cleanContext, "map=%03u tile=[%02u,%02u] source=intermediate-solid", mapId, tileX, tileY);
+        TerrainBuilder::cleanVertices(data.solidVerts, data.solidTris, cleanContext);
         // get bounds of current tile
         float bmin[3], bmax[3];
         getTileBounds(tileX, tileY, data.solidVerts.getCArray(), data.solidVerts.size() / 3, bmin, bmax);
@@ -529,8 +531,13 @@ namespace MMAP
         }
 
         // remove unused vertices
-        TerrainBuilder::cleanVertices(meshData.solidVerts, meshData.solidTris);
-        TerrainBuilder::cleanVertices(meshData.liquidVerts, meshData.liquidTris);
+        char solidCleanContext[128];
+        sprintf(solidCleanContext, "map=%03u tile=[%02u,%02u] source=solid", mapID, tileX, tileY);
+        TerrainBuilder::cleanVertices(meshData.solidVerts, meshData.solidTris, solidCleanContext);
+
+        char liquidCleanContext[128];
+        sprintf(liquidCleanContext, "map=%03u tile=[%02u,%02u] source=liquid", mapID, tileX, tileY);
+        TerrainBuilder::cleanVertices(meshData.liquidVerts, meshData.liquidTris, liquidCleanContext);
 
         // gather all mesh data for final data check, and bounds calculation
         G3D::Array<float> allVerts;
