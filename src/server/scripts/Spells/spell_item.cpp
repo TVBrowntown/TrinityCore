@@ -37,9 +37,6 @@
 #include "SpellHistory.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
-//npcbot
-#include "botmgr.h"
-//end npcbot
 
 enum GenericData
 {
@@ -1680,11 +1677,6 @@ class spell_item_noggenfogger_elixir : public SpellScript
 
     bool Load() override
     {
-        //npcbot
-        if (GetCaster()->IsNPCBot())
-            return true;
-        //end npcbot
-
         return GetCaster()->GetTypeId() == TYPEID_PLAYER;
     }
 
@@ -3662,14 +3654,6 @@ class spell_item_death_choice : public AuraScript
         float str = caster->GetStat(STAT_STRENGTH);
         float agi = caster->GetStat(STAT_AGILITY);
 
-        //npcbot: try get stats
-        if (caster->IsNPCBot())
-        {
-            str = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_STRENGTH);
-            agi = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_AGILITY);
-        }
-        //end npcbot
-
         switch (aurEff->GetId())
         {
             case SPELL_DEATH_CHOICE_NORMAL_AURA:
@@ -3816,16 +3800,6 @@ class spell_item_darkmoon_card_greatness : public AuraScript
         float agi = caster->GetStat(STAT_AGILITY);
         float intl = caster->GetStat(STAT_INTELLECT);
         float spi = caster->GetStat(STAT_SPIRIT);
-
-        //npcbot: try get stats
-        if (caster->IsNPCBot())
-        {
-            str = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_STRENGTH);
-            agi = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_AGILITY);
-            intl = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_INTELLECT);
-            spi = BotMgr::GetBotStat(caster->ToCreature(), BOT_STAT_MOD_SPIRIT);
-        }
-        //end npcbot
 
         float stat = 0.0f;
 

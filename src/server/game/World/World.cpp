@@ -1392,6 +1392,19 @@ void World::LoadConfigSettings(bool reload)
         m_float_configs[CONFIG_RESPAWN_DYNAMICRATE_GAMEOBJECT] = 10.0f;
     }
     m_int_configs[CONFIG_RESPAWN_DYNAMICMINIMUM_GAMEOBJECT] = sConfigMgr->GetIntDefault("Respawn.DynamicMinimumGameObject", 10);
+
+    // Dynamic Respawn Scaling (location-aware, per-death). Ported from Turtle WoW.
+    // Defaults of 0 / -1 keep the feature dormant until operators opt in.
+    m_float_configs[CONFIG_DYN_RESPAWN_CHECK_RANGE]            = sConfigMgr->GetFloatDefault("DynamicRespawn.Range", -1.0f);
+    m_float_configs[CONFIG_DYN_RESPAWN_MAX_REDUCTION_RATE]     = sConfigMgr->GetFloatDefault("DynamicRespawn.MaxReductionRate", 0.0f);
+    m_float_configs[CONFIG_DYN_RESPAWN_PERCENT_PER_PLAYER]     = sConfigMgr->GetFloatDefault("DynamicRespawn.PercentPerPlayer", 0.0f);
+    m_int_configs[CONFIG_DYN_RESPAWN_MIN_RESPAWN_TIME]         = sConfigMgr->GetIntDefault("DynamicRespawn.MinRespawnTime", 0);
+    m_int_configs[CONFIG_DYN_RESPAWN_MIN_RESPAWN_TIME_INDOORS] = sConfigMgr->GetIntDefault("DynamicRespawn.MinIndoorRespawnTime", 0);
+    m_int_configs[CONFIG_DYN_RESPAWN_AFFECT_RESPAWN_TIME_BELOW]= sConfigMgr->GetIntDefault("DynamicRespawn.AffectRespawnTimeBelow", 0);
+    m_int_configs[CONFIG_DYN_RESPAWN_AFFECT_LEVEL_BELOW]       = sConfigMgr->GetIntDefault("DynamicRespawn.AffectLevelBelow", 0);
+    m_int_configs[CONFIG_DYN_RESPAWN_PLAYERS_THRESHOLD]        = sConfigMgr->GetIntDefault("DynamicRespawn.PlayersThreshold", 0);
+    m_int_configs[CONFIG_DYN_RESPAWN_PLAYERS_LEVELDIFF]        = sConfigMgr->GetIntDefault("DynamicRespawn.PlayersMaxLevelDiff", 0);
+
     _guidWarningMsg = sConfigMgr->GetStringDefault("Respawn.WarningMessage", "There will be an unscheduled server restart at 03:00. The server will be available again shortly after.");
     _alertRestartReason = sConfigMgr->GetStringDefault("Respawn.AlertRestartReason", "Urgent Maintenance");
     m_int_configs[CONFIG_RESPAWN_GUIDWARNING_FREQUENCY] = sConfigMgr->GetIntDefault("Respawn.WarningFrequency", 1800);

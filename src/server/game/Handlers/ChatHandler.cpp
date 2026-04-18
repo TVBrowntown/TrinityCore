@@ -43,8 +43,6 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include <algorithm>
-//npcbot
-//end npcbot
 // @tswow-begin
 #include "TSUnit.h"
 #include "TSCreature.h"
@@ -344,8 +342,6 @@ void WorldSession::HandleMessagechatOpcode(WorldPacket& recvData)
                 TSPlayer(sender).SendAddonMessage("tsmp", std::to_string(sender->GetMapId()), CHAT_MSG_WHISPER, TSPlayer(sender));
             }
             // @tswow-end
-            //npcbot
-            //end npcbot
             if (!receiver || (lang != LANG_ADDON && !receiver->isAcceptWhispers() && receiver->GetSession()->HasPermission(rbac::RBAC_PERM_CAN_FILTER_WHISPERS) && !receiver->IsInWhisperWhiteList(sender->GetGUID())))
             {
                 SendPlayerNotFoundNotice(to);

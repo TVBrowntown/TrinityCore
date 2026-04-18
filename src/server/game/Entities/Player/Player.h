@@ -88,10 +88,6 @@ enum ItemClass : uint8;
 enum LootError : uint8;
 enum LootType : uint8;
 
-// NpcBot mod
-class BotMgr;
-// end NpcBot mod
-
 typedef std::deque<Mail*> PlayerMails;
 
 #define PLAYER_MAX_SKILLS           127
@@ -903,6 +899,7 @@ struct ResurrectionData
     uint32 Health;
     uint32 Mana;
     uint32 Aura;
+    uint32 SourceSpellId;
 };
 
 #define SPELL_DK_RAISE_ALLY 46619
@@ -1534,7 +1531,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
         void SetLastPotionId(uint32 item_id) { m_lastPotionId = item_id; }
         void UpdatePotionCooldown(Spell* spell = nullptr);
 
-        void SetResurrectRequestData(WorldObject const* caster, uint32 health, uint32 mana, uint32 appliedAura);
+        void SetResurrectRequestData(WorldObject const* caster, uint32 health, uint32 mana, uint32 appliedAura, uint32 sourceSpellId = 0);
 
         void ClearResurrectRequestData()
         {
@@ -1869,7 +1866,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
         bool HasCorpse() const { return _corpseLocation.GetMapId() != MAPID_INVALID; }
         WorldLocation const& GetCorpseLocation() const { return _corpseLocation; }
         uint32 GetResurrectionSpellId();
-        void ResurrectPlayer(float restore_percent, bool applySickness = false);
+        void ResurrectPlayer(float restore_percent, bool applySickness = false, uint32 sourceSpellId = 0);
         void BuildPlayerRepop();
         void RepopAtGraveyard();
 
@@ -2666,24 +2663,7 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
 
         TimeTracker m_groupUpdateTimer;
 
-    public:
-        /*****************************************************************/
-        /***                        NPCBOT SYSTEM                      ***/
-        /*****************************************************************/
-        BotMgr* GetBotMgr() const { return _botMgr; }
-        bool HaveBot() const;
-        uint8 GetNpcBotsCount() const;
-        void RemoveAllBots(uint8 removetype = 0);
-        void UpdatePhaseForBots();
-
     private:
-        /*****************************************************************/
-        /***                        NPCBOT SYSTEM                      ***/
-        /*****************************************************************/
-        BotMgr* _botMgr;
-        /*****************************************************************/
-        /***                      END NPCBOT SYSTEM                    ***/
-        /*****************************************************************/
         // internal common parts for CanStore/StoreItem functions
         InventoryResult CanStoreItem_InSpecificSlot(uint8 bag, uint8 slot, ItemPosCountVec& dest, ItemTemplate const* pProto, uint32& count, bool swap, Item* pSrcItem) const;
         InventoryResult CanStoreItem_InBag(uint8 bag, ItemPosCountVec& dest, ItemTemplate const* pProto, uint32& count, bool merge, bool non_specialized, Item* pSrcItem, uint8 skip_bag, uint8 skip_slot) const;

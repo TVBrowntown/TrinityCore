@@ -124,7 +124,11 @@ namespace MMAP
         getDirContents(files, "maps");
         for (uint32 i = 0; i < files.size(); ++i)
         {
-            mapID = uint32(atoi(files[i].substr(0,3).c_str()));
+            // Map file format: <mapid><YY><XX>.map where mapid is variable-width.
+            // Strip the last 4 chars (YYXX) and everything from the dot onward.
+            size_t dot = files[i].find('.');
+            if (dot == std::string::npos || dot < 4) continue;
+            mapID = uint32(atoi(files[i].substr(0, dot - 4).c_str()));
             if (std::find(m_tiles.begin(), m_tiles.end(), mapID) == m_tiles.end())
             {
                 m_tiles.emplace_back(MapTiles(mapID, new std::set<uint32>));
@@ -136,7 +140,10 @@ namespace MMAP
         getDirContents(files, "vmaps", "*.vmtree");
         for (uint32 i = 0; i < files.size(); ++i)
         {
-            mapID = uint32(atoi(files[i].substr(0,3).c_str()));
+            // Vmtree file format: <mapid>.vmtree — mapid is everything before the dot.
+            size_t dot = files[i].find('.');
+            if (dot == std::string::npos) continue;
+            mapID = uint32(atoi(files[i].substr(0, dot).c_str()));
             if (std::find(m_tiles.begin(), m_tiles.end(), mapID) == m_tiles.end())
             {
                 m_tiles.emplace_back(MapTiles(mapID, new std::set<uint32>));
@@ -152,26 +159,36 @@ namespace MMAP
             std::set<uint32>* tiles = (*itr).m_tiles;
             mapID = (*itr).m_mapId;
 
-            sprintf(filter, "%03u*.vmtile", mapID);
+            sprintf(filter, "%u_*.vmtile", mapID);
             files.clear();
             getDirContents(files, "vmaps", filter);
             for (uint32 i = 0; i < files.size(); ++i)
             {
-                tileX = uint32(atoi(files[i].substr(7,2).c_str()));
-                tileY = uint32(atoi(files[i].substr(4,2).c_str()));
+                // Vmtile file format: <mapid>_<XX>_<YY>.vmtile — mapid is variable-width.
+                size_t u1 = files[i].find('_');
+                if (u1 == std::string::npos) continue;
+                tileX = uint32(atoi(files[i].substr(u1 + 1, 2).c_str()));
+                tileY = uint32(atoi(files[i].substr(u1 + 4, 2).c_str()));
                 tileID = StaticMapTree::packTileID(tileY, tileX);
 
                 tiles->insert(tileID);
                 count++;
             }
 
-            sprintf(filter, "%03u*", mapID);
+            sprintf(filter, "%u*", mapID);
             files.clear();
             getDirContents(files, "maps", filter);
             for (uint32 i = 0; i < files.size(); ++i)
             {
-                tileY = uint32(atoi(files[i].substr(3,2).c_str()));
-                tileX = uint32(atoi(files[i].substr(5,2).c_str()));
+                // Map file format: <mapid><YY><XX>.map — strip dot-suffix and read last 4 digits.
+                size_t dot = files[i].find('.');
+                if (dot == std::string::npos || dot < 4) continue;
+                // Only accept files where the mapid prefix is EXACTLY our mapID
+                // (the glob "%u*" may match 146* against 1469* etc. — filter precisely here).
+                uint32 parsed = uint32(atoi(files[i].substr(0, dot - 4).c_str()));
+                if (parsed != mapID) continue;
+                tileY = uint32(atoi(files[i].substr(dot - 4, 2).c_str()));
+                tileX = uint32(atoi(files[i].substr(dot - 2, 2).c_str()));
                 tileID = StaticMapTree::packTileID(tileX, tileY);
 
                 if (tiles->insert(tileID).second)

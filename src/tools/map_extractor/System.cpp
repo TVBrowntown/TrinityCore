@@ -955,7 +955,7 @@ void ExtractMapsFromMpq(uint32 build)
         WDT_file wdt;
         if (!wdt.loadFile(mpqMapName, false))
         {
-//            printf("Error loading %s map wdt data\n", map_ids[z].name);
+            printf("Error loading %s map wdt data (tried %s)\n", map_ids[z].name, mpqMapName.c_str());
             continue;
         }
 

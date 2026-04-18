@@ -35,11 +35,6 @@
 #include "Vehicle.h"
 #include "World.h"
 #include "WorldPacket.h"
-//npcbot: try query bot name
-#include "CreatureData.h"
-#include "botdatamgr.h"
-#include "botmgr.h"
-//end npcbot
 
 class Aura;
 
@@ -80,28 +75,6 @@ void WorldSession::HandleGroupInviteOpcode(WorldPackets::Party::PartyInviteClien
 
     Player* invitingPlayer = GetPlayer();
     Player* invitedPlayer = ObjectAccessor::FindPlayerByName(packet.TargetName);
-
-    //npcbot: handle group invite for bots by name
-    if (!invitedPlayer)
-    {
-        // Check if the player has a bot targeted with this name
-        Unit* target = invitingPlayer->GetSelectedUnit();
-        if (target && target->IsNPCBot() && target->GetName() == packet.TargetName)
-        {
-            Creature* bot = target->ToCreature();
-            if (bot->IsFreeBot())
-            {
-                ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("%s declines your group invitation.", bot->GetName().c_str());
-                ChatHandler(GetPlayer()->GetSession()).SendSysMessage("Use '.npcbot add' while targeting a bot to hire them instead.");
-            }
-            else
-            {
-                ChatHandler(GetPlayer()->GetSession()).PSendSysMessage("%s is already in a group.", bot->GetName().c_str());
-            }
-            return;
-        }
-    }
-    //end npcbot
 
     // no player
     if (!invitedPlayer)
@@ -329,31 +302,6 @@ void WorldSession::HandleGroupUninviteGuidOpcode(WorldPacket& recvData)
     ObjectGuid guid;
     std::string reason;
     recvData >> guid;
-    //npcbot: try send bot group member info
-    if (guid.IsCreature())
-    {
-        if (!GetPlayer()->GetGroup() || !GetPlayer()->GetGroup()->IsMember(guid))
-        {
-            WorldPacket data(SMSG_PARTY_MEMBER_STATS_FULL, 3+4+2);
-            data << uint8(0);
-            data << guid.WriteAsPacked();
-            data << uint32(GROUP_UPDATE_FLAG_STATUS);
-            data << uint16(MEMBER_STATUS_OFFLINE);
-            SendPacket(&data);
-            return;
-        }
-
-        uint32 creatureId = guid.GetEntry();
-        CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureId);
-        if (creatureTemplate && creatureTemplate->IsNPCBot())
-        {
-            WorldPacket bpdata(SMSG_PARTY_MEMBER_STATS_FULL, 4+2+2+2+1+2*6+8+1+8);
-            BotMgr::BuildBotPartyMemberStatsPacket(guid, &bpdata);
-            SendPacket(&bpdata);
-            return;
-        }
-    }
-    //end npcbot
     recvData >> reason;
 
     //can't uninvite yourself
@@ -678,13 +626,6 @@ void WorldSession::HandleGroupChangeSubGroupOpcode(WorldPacket& recvData)
         guid = movedPlayer->GetGUID();
     else
         guid = sCharacterCache->GetCharacterGuidByName(name);
-    //npcbot
-    if (guid.IsEmpty())
-    {
-        if (Creature const* bot = BotDataMgr::FindBot(name, GetSessionDbcLocale()))
-            guid = bot->GetGUID();
-    }
-    //end npcbot
 
     if (guid.IsEmpty())
         return;

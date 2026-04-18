@@ -432,10 +432,6 @@ class TC_GAME_API Spell
         SpellCustomErrors m_customError;
 
         UsedSpellMods m_appliedMods;
-        //npcbot
-        int32 GetTimer() const { return m_timer; }
-        //end npcbot
-
         int32 GetCastTime() const { return m_casttime; }
         bool IsAutoRepeat() const { return m_autoRepeat; }
         void SetAutoRepeat(bool rep) { m_autoRepeat = rep; }

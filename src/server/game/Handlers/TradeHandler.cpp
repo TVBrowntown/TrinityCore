@@ -665,21 +665,6 @@ void WorldSession::HandleInitiateTradeOpcode(WorldPacket& recvPacket)
 
     Player* pOther = ObjectAccessor::FindPlayer(ID);
 
-    //npcbot: handle trade with bot - decline after a short delay
-    if (!pOther && ID.IsCreature())
-    {
-        if (Creature* bot = ObjectAccessor::GetCreature(*GetPlayer(), ID))
-        {
-            if (bot->IsNPCBot())
-            {
-                ChatHandler(this).PSendSysMessage("%s shakes their head.", bot->GetName().c_str());
-                info.Status = TRADE_STATUS_BUSY;
-                SendTradeStatus(info);
-                return;
-            }
-        }
-    }
-    //end npcbot
 
     if (!pOther)
     {

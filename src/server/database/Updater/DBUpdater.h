@@ -73,9 +73,6 @@ public:
     static inline std::string GetTableName();
 
     static std::string GetBaseFile();
-    //npcbot
-    static std::string GetBaseNPCBotFile();
-    //end npcbot
 
     static bool IsEnabled(uint32 const updateMask);
 

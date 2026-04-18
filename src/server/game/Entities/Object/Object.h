@@ -175,12 +175,6 @@ class TC_GAME_API Object
 
         // FG: some hacky helpers
         void ForceValuesUpdateAtIndex(uint32);
-        //npcbot
-        virtual bool IsNPCBot() const { return false; }
-        virtual bool IsNPCBotPet() const { return false; }
-        virtual bool IsNPCBotOrPet() const { return false; }
-        //end npcbot
-
         inline bool IsWorldObject() const { return isType(TYPEMASK_WORLDOBJECT); }
         static WorldObject* ToWorldObject(Object* o) { return o ? o->ToWorldObject() : nullptr; }
         static WorldObject const* ToWorldObject(Object const* o) { return o ? o->ToWorldObject() : nullptr; }

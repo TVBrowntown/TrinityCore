@@ -360,13 +360,6 @@ private:
             return;
 
         amount = talentSpell->GetEffect(EFFECT_0).CalcValue(owner);
-        //npcbot: take bot attack power into account
-        if (Creature const* bot = owner->ToCreature())
-        {
-            if (bot->IsNPCBot())
-                amount += int32(2 * bot->GetTotalAttackPowerValue(BASE_ATTACK));
-        }
-        //end npcbot
         if (Player* player = owner->ToPlayer())
             amount += int32(2 * player->GetTotalAttackPowerValue(BASE_ATTACK));
     }
@@ -1111,11 +1104,7 @@ class spell_dk_icebound_fortitude : public AuraScript
         if (Unit* caster = GetCaster())
         {
             int32 value = amount;
-            //npcbot: handle non-player casters
-            uint32 defValue = 400;
-            if (Player* player = caster->ToPlayer())
-                defValue = uint32(player->GetSkillValue(SKILL_DEFENSE) + player->GetRatingBonusValue(CR_DEFENSE_SKILL));
-            //end npcbot
+            uint32 defValue = uint32(caster->ToPlayer()->GetSkillValue(SKILL_DEFENSE) + caster->ToPlayer()->GetRatingBonusValue(CR_DEFENSE_SKILL));
 
             if (defValue > 400)
                 value -= int32((defValue - 400) * 0.15);
@@ -1859,16 +1848,6 @@ private:
     void Absorb(AuraEffect* /*aurEff*/, DamageInfo & dmgInfo, uint32 & absorbAmount)
     {
         // You have a chance equal to your Parry chance
-        //npcbot handle creature case (and prevent crashes)
-        Unit* target = GetTarget();
-        if (target->GetTypeId() == TYPEID_UNIT)
-        {
-            if (dmgInfo.GetDamageType() == SPELL_DIRECT_DAMAGE &&
-                roll_chance_f(target->ToCreature()->GetCreatureParryChance()))
-                absorbAmount = CalculatePct(dmgInfo.GetDamage(), absorbPct);
-        }
-        else
-        //end npcbot
         if ((dmgInfo.GetDamageType() == SPELL_DIRECT_DAMAGE) && roll_chance_f(GetTarget()->GetFloatValue(PLAYER_PARRY_PERCENTAGE)))
             absorbAmount = CalculatePct(dmgInfo.GetDamage(), absorbPct);
     }
@@ -2268,7 +2247,7 @@ class spell_dk_raise_ally_initial : public SpellScript
         {
             if (target->IsResurrectRequested()) // already have one active request
                 return;
-            target->SetResurrectRequestData(GetCaster(), 0, 0, uint32(GetEffectValue()));
+            target->SetResurrectRequestData(GetCaster(), 0, 0, uint32(GetEffectValue()), GetSpellInfo()->Id);
             GetSpell()->SendResurrectRequest(target);
         }
     }

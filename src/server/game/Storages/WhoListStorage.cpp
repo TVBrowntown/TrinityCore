@@ -21,11 +21,6 @@
 #include "Player.h"
 #include "GuildMgr.h"
 #include "WorldSession.h"
-//npcbot
-#include "botdatamgr.h"
-#include "Creature.h"
-#include "Map.h"
-//end npcbot
 
 WhoListStorageMgr* WhoListStorageMgr::instance()
 {
@@ -64,52 +59,4 @@ void WhoListStorageMgr::Update()
             widePlayerName, wideGuildName, playerName, guildName);
     }
 
-    //npcbot: add wandering bots to who list
-    if (BotDataMgr::AllBotsLoaded())
-    {
-        NpcBotRegistry const& botList = BotDataMgr::GetExistingNPCBots();
-        for (Creature const* bot : botList)
-        {
-            if (!bot || !bot->IsAlive() || !bot->FindMap() || !bot->IsFreeBot())
-                continue;
-
-            std::string botName = bot->GetName();
-            std::wstring wideBotName;
-            if (!Utf8toWStr(botName, wideBotName))
-                continue;
-            wstrToLower(wideBotName);
-
-            NpcBotExtras const* extras = BotDataMgr::SelectNpcBotExtras(bot->GetEntry());
-            if (!extras)
-                continue;
-
-            uint8 botClass = extras->bclass;
-            // Map custom bot classes to closest standard class for /who display
-            // Client only understands classes 1-11
-            switch (botClass)
-            {
-                case 12: botClass = CLASS_WARRIOR; break;       // Blademaster -> Warrior
-                case 13: botClass = CLASS_WARLOCK; break;       // Obsidian Destroyer -> Warlock
-                case 14: botClass = CLASS_MAGE; break;          // Archmage -> Mage
-                case 15: botClass = CLASS_WARLOCK; break;       // Dreadlord -> Warlock
-                case 16: botClass = CLASS_PALADIN; break;       // Spell Breaker -> Paladin
-                case 17: botClass = CLASS_HUNTER; break;        // Dark Ranger -> Hunter
-                case 18: botClass = CLASS_WARLOCK; break;       // Necromancer -> Warlock
-                case 19: botClass = CLASS_MAGE; break;          // Sea Witch -> Mage
-                case 20: botClass = CLASS_WARRIOR; break;       // Crypt Lord -> Warrior
-                default: break;
-            }
-            uint8 botRace = extras->race;
-            uint32 botTeam = (botRace == 2 || botRace == 5 || botRace == 6 || botRace == 8) ? HORDE : ALLIANCE;
-            uint8 botGender = 0;
-            if (NpcBotAppearanceData const* appearance = BotDataMgr::SelectNpcBotAppearance(bot->GetEntry()))
-                botGender = appearance->gender;
-
-            std::wstring wideGuildEmpty;
-            _whoListStorage.emplace_back(bot->GetGUID(), botTeam, SEC_PLAYER, bot->GetLevel(),
-                botClass, botRace, bot->GetZoneId(), botGender, true,
-                wideBotName, wideGuildEmpty, botName, "");
-        }
-    }
-    //end npcbot
 }

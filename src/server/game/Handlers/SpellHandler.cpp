@@ -42,11 +42,6 @@
 #include "TotemPackets.h"
 #include "World.h"
 #include "WorldPacket.h"
-//npcbot
-#include "bot_ai.h"
-#include "botconfig.h"
-#include "botdatamgr.h"
-//end npcbot
 
 void WorldSession::HandleClientCastFlags(WorldPacket& recvPacket, uint8 castFlags, SpellCastTargets& targets)
 {
@@ -613,87 +608,6 @@ void WorldSession::HandleMirrorImageDataRequest(WorldPacket& recvData)
     Unit* unit = ObjectAccessor::GetUnit(*_player, guid);
     if (!unit)
         return;
-
-    //npcbot
-    if (unit->GetTypeId() == TYPEID_UNIT)
-    {
-        // CreatureOutfit reconciliation (Phase 7): NPCBots and tswow outfits coexist.
-        // NPCBots are handled here first; non-bot creatures fall through to tswow's CreatureOutfit below.
-        //npcbot minion without a record in outfits table
-        //OR
-        //npcbot's mirror image
-        Creature const* bot = unit->ToCreature();
-        if (!bot->IsNPCBot() && unit->HasAuraType(SPELL_AURA_CLONE_CASTER))
-            if (Unit const* creator = unit->GetAuraEffectsByType(SPELL_AURA_CLONE_CASTER).front()->GetCaster())
-                if (creator->IsNPCBot())
-                    bot = creator->ToCreature();
-
-        if (bot->IsNPCBot())
-        {
-            NpcBotAppearanceData const* appearData = BotDataMgr::SelectNpcBotAppearance(bot->GetEntry());
-
-            WorldPacket data(SMSG_MIRRORIMAGE_DATA, 68);
-            data << guid;
-            data << uint32(bot->GetDisplayId());                                       // displayId
-            data << uint8(bot->GetRace());                                             // race
-            data << uint8(appearData ? appearData->gender : (uint8)bot->GetGender());  // gender
-            data << uint8(bot->GetBotAI()->GetPlayerClass());                          // class
-            data << uint8(appearData ? appearData->skin : 0);                          // skin
-            data << uint8(appearData ? appearData->face : 0);                          // face
-            data << uint8(appearData ? appearData->hair : 0);                          // hair
-            data << uint8(appearData ? appearData->haircolor : 0);                     // haircolor
-            data << uint8(appearData ? appearData->features : 0);                      // facialhair
-            data << uint32(0);                                                         // guildId
-
-            static constexpr uint8 NUM_BOT_OUTFIT_DISPLAYS = 11;
-            static uint8 const botItemSlots[NUM_BOT_OUTFIT_DISPLAYS] =
-            {
-                BOT_SLOT_HEAD,
-                BOT_SLOT_SHOULDERS,
-                BOT_SLOT_BODY,
-                BOT_SLOT_CHEST,
-                BOT_SLOT_WAIST,
-                BOT_SLOT_LEGS,
-                BOT_SLOT_FEET,
-                BOT_SLOT_WRIST,
-                BOT_SLOT_HANDS,
-                BOT_SLOT_BACK,
-                0//tabard
-            };
-
-            // Display items in visible slots
-            for (uint8 i = 0; i != NUM_BOT_OUTFIT_DISPLAYS; ++i)
-            {
-                uint8 slot = botItemSlots[i];
-                //Items not displayed on bot: tabard, head, back
-                if (slot == 0 ||
-                    (slot == BOT_SLOT_HEAD && BotCfg::ShowEquippedHelm() == false) ||
-                    (slot == BOT_SLOT_BACK && BotCfg::ShowEquippedCloak() == false))
-                {
-                    data << uint32(0);
-                    continue;
-                }
-
-                uint32 display_id = bot->GetBotAI()->GetEquipDisplayId(slot);
-                if (display_id)
-                    data << uint32(display_id);
-                else
-                {
-                    //don't allow to go naked
-                    if (slot == BOT_SLOT_CHEST)
-                        data << uint32(CHEST_HALISCAN);
-                    else if (slot == BOT_SLOT_LEGS)
-                        data << uint32(LEGS_HALISCAN);
-                    else
-                        data << uint32(0);
-                }
-            }
-
-            SendPacket(&data);
-            return;
-        }
-    }
-    //end npcbot
 
     if (Creature* creature = unit->ToCreature())
     {

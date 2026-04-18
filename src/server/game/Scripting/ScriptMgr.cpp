@@ -43,9 +43,6 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
-//npcbot
-#include "botconfig.h"
-//end npcbot
 
 // @tswow-begin
 #include "TSMap.h"
@@ -1060,10 +1057,6 @@ void ScriptMgr::Initialize()
 
     // LFGScripts
     lfg::AddSC_LFGScripts();
-
-    //npcbot: load bot scripts here
-    AddNpcBotScripts();
-    //end npcbot
 
     // Load all static linked scripts through the script loader function.
     ASSERT(_script_loader_callback,
