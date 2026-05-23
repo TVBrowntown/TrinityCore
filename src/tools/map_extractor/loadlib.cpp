@@ -68,7 +68,10 @@ bool FileLoader::prepareLoadedData()
     version = (file_MVER *) data;
     if (version->fcc != MverMagic.fcc)
         return false;
-    if (version->ver != FILE_FORMAT_VERSION)
+    // Turtle's Stormwind Harbor extension ships ADTs with MVER=19 alongside
+    // the standard MVER=18. The 3.3.5a client accepts both; honour that here
+    // so loose-files extraction doesn't silently drop those tiles.
+    if (version->ver != FILE_FORMAT_VERSION && version->ver != FILE_FORMAT_VERSION + 1)
         return false;
     return true;
 }

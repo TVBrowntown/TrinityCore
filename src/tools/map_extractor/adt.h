@@ -139,7 +139,11 @@ public:
     }
     adt_MCLQ *getMCLQ()
     {
-        if (offsMCLQ)
+        // Turtle WoW (and other custom 1.12-derived patches) write 0xFFFFFFFF
+        // as the "no liquid" sentinel instead of 0. Without this guard, pointer
+        // arithmetic (uint8*)this + 0xFFFFFFFF promotes the uint32 to int64
+        // and adds 4 GiB, then dereferencing segfaults extraction.
+        if (offsMCLQ && offsMCLQ != 0xFFFFFFFFu)
             return (adt_MCLQ *)((uint8 *)this + offsMCLQ);
         return 0;
     }

@@ -132,8 +132,9 @@ bool adt_MCNK::prepareLoadedData()
     // Check height map
     if (offsMCVT && !getMCVT()->prepareLoadedData())
         return false;
-    // Check liquid data
-    if (offsMCLQ && !getMCLQ()->prepareLoadedData())
+    // Check liquid data — see adt.h getMCLQ() comment for the 0xFFFFFFFF
+    // sentinel that Turtle/custom 1.12 ADTs use for "no liquid".
+    if (offsMCLQ && offsMCLQ != 0xFFFFFFFFu && !getMCLQ()->prepareLoadedData())
         return false;
 
     return true;

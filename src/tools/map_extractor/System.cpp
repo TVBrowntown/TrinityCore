@@ -628,7 +628,13 @@ bool ConvertADT(std::string const& inputPath, std::string const& outputPath, int
 
             adt_MCLQ *liquid = cell->getMCLQ();
             int count = 0;
-            if (!liquid || cell->sizeMCLQ <= 8)
+            // Turtle/1.12 ADTs that the Python water sanitizer has touched
+            // keep the MCNK header sizeMCLQ field intact but rewrite the
+            // MCLQ chunk's own size field to 0 (so the dual MCLQ+MH2O
+            // checkerboard goes away — MH2O wins). Honour that signal:
+            // a 0-size MCLQ chunk has no real liquid data, even though
+            // the header still claims a payload exists.
+            if (!liquid || cell->sizeMCLQ <= 8 || liquid->size == 0)
                 continue;
 
             for (int y = 0; y < ADT_CELL_SIZE; y++)
@@ -681,7 +687,12 @@ bool ConvertADT(std::string const& inputPath, std::string const& outputPath, int
 
     // Get liquid map for grid (in WOTLK used MH2O chunk)
     adt_MH2O * h2o = adt.a_grid->getMH2O();
-    if (h2o)
+    // Sanitized Turtle ADTs leave MH2O at the same offset but with chunk
+    // size=0 (the per-cell SMLiquidChunk array is gone). Without this
+    // guard, GetLiquidInstance reads past the chunk into the next file
+    // chunk and the resulting bogus offsets segfault GetLiquidExistsBitmap.
+    // sizeof(adt_MH2O) - 8 = 256 cells × 12 bytes = 3072 minimum payload.
+    if (h2o && h2o->size >= sizeof(adt_MH2O::adt_LIQUID) * ADT_CELLS_PER_GRID * ADT_CELLS_PER_GRID)
     {
         for (int32 i = 0; i < ADT_CELLS_PER_GRID; i++)
         {

@@ -33,6 +33,17 @@ MPQArchive::MPQArchive(char const* filename)
     {
         is_directory = true;
         mpq_a = nullptr;
+        // Build a case-insensitive index of the loose-files tree so that
+        // MPQ-style lookups ("World\\Maps\\X\\Y.adt") resolve against the
+        // mixed-case POSIX filesystem the way they would in a real archive.
+        boost::filesystem::recursive_directory_iterator it(this->filename), end;
+        for (; it != end; ++it)
+        {
+            if (!boost::filesystem::is_regular_file(it->path()))
+                continue;
+            auto rel = boost::filesystem::relative(it->path(), this->filename).string();
+            dir_index.emplace(normalize_mpq_path(rel), rel);
+        }
         gOpenArchives.push_front(this);
         return;
     }
@@ -83,7 +94,10 @@ MPQFile::MPQFile(char const* filename):
     {
         if((*i)->is_directory)
         {
-            auto fullpath = (*i)->filename / boost::filesystem::path(filename);
+            auto idx = (*i)->dir_index.find(normalize_mpq_path(filename));
+            if (idx == (*i)->dir_index.end())
+                continue;
+            auto fullpath = boost::filesystem::path((*i)->filename) / idx->second;
             if(boost::filesystem::exists(fullpath))
             {
                 std::ifstream fin;

@@ -118,7 +118,9 @@ namespace MMAP
     {
         std::vector<std::string> files;
         uint32 mapID, tileX, tileY, tileID, count = 0;
-        char filter[12];
+        // Holds globs like "%03u_*.vmtile" (worst case "9999_*.vmtile" = 14
+        // bytes incl. NUL) or "%03u*" (5 bytes). 24 leaves plenty of headroom.
+        char filter[24];
 
         printf("Discovering maps... ");
         getDirContents(files, "maps");
@@ -159,12 +161,20 @@ namespace MMAP
             std::set<uint32>* tiles = (*itr).m_tiles;
             mapID = (*itr).m_mapId;
 
-            sprintf(filter, "%u_*.vmtile", mapID);
+            // vmap4extractor zero-pads mapid to 3 digits in vmtile filenames
+            // (e.g. 001_42_30.vmtile). The old "%u_*.vmtile" glob produced
+            // "1_*.vmtile" for map 1, which matches none of the actual files,
+            // so discoverTiles fell through to the empty-bounds fallback and
+            // generated zero mmtiles for every map in the 1..99 range
+            // (Kalimdor + most instances). Pad to %03u so the glob matches
+            // the on-disk filenames; mapID >= 1000 still works because %03u
+            // is a minimum width, not a fixed one.
+            sprintf(filter, "%03u_*.vmtile", mapID);
             files.clear();
             getDirContents(files, "vmaps", filter);
             for (uint32 i = 0; i < files.size(); ++i)
             {
-                // Vmtile file format: <mapid>_<XX>_<YY>.vmtile — mapid is variable-width.
+                // Vmtile file format: <mapid>_<XX>_<YY>.vmtile — mapid is 3+ digits.
                 size_t u1 = files[i].find('_');
                 if (u1 == std::string::npos) continue;
                 tileX = uint32(atoi(files[i].substr(u1 + 1, 2).c_str()));
@@ -175,7 +185,11 @@ namespace MMAP
                 count++;
             }
 
-            sprintf(filter, "%u*", mapID);
+            // mapextractor uses the same 3-digit zero-padded format
+            // (e.g. 0013342.map for map 1, tileY=33, tileX=42). Old "%u*"
+            // glob "1*" matched nothing for map 1. The parsed-check below
+            // already filters precisely so the broad form is safe.
+            sprintf(filter, "%03u*", mapID);
             files.clear();
             getDirContents(files, "maps", filter);
             for (uint32 i = 0; i < files.size(); ++i)

@@ -24,10 +24,24 @@
 #include <boost/filesystem.hpp>
 #include <string.h>
 #include <ctype.h>
+#include <algorithm>
+#include <unordered_map>
 #include <vector>
 #include <iostream>
 #include <fstream>
 #include <deque>
+
+// Normalize an MPQ-style path ("World\\Maps\\X\\Y.adt") to a POSIX
+// filesystem lookup key (forward slashes, lowercased) so the directory-
+// archive code can compare against case-insensitive MPQ semantics on a
+// case-sensitive filesystem.
+inline std::string normalize_mpq_path(std::string s)
+{
+    std::replace(s.begin(), s.end(), '\\', '/');
+    std::transform(s.begin(), s.end(), s.begin(),
+        [](unsigned char c){ return (char)std::tolower(c); });
+    return s;
+}
 
 class MPQArchive
 {
@@ -36,6 +50,10 @@ public:
     mpq_archive_s *mpq_a;
     std::string filename;
     bool is_directory;
+    // Populated only for directory archives: lowercased-forward-slash
+    // relative path → on-disk relative path. Lets the loose-files path
+    // serve files looked up by their MPQ-style name on Linux.
+    std::unordered_map<std::string, std::string> dir_index;
 
     MPQArchive(char const* filename);
     ~MPQArchive() { close(); }
