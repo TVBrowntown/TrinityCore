@@ -289,30 +289,45 @@ void SocialMgr::BroadcastToFriendListers(Player* player, WorldPacket const* pack
     ASSERT(player);
 
     AccountTypes gmSecLevel = AccountTypes(sWorld->getIntConfig(CONFIG_GM_LEVEL_IN_WHO_LIST));
-    for (SocialMap::const_iterator itr = _socialMap.begin(); itr != _socialMap.end(); ++itr)
+
+    // @megaserver A4: snapshot the GUIDs of everyone who friend-lists `player` while
+    // holding the social-map lock (so the map can't be mutated/invalidated mid-walk),
+    // then release it before the ObjectAccessor lookups + packet sends below.
+    std::vector<ObjectGuid> listers;
     {
-        PlayerSocial::PlayerSocialMap::const_iterator itr2 = itr->second._playerSocialMap.find(player->GetGUID());
-        if (itr2 != itr->second._playerSocialMap.end() && (itr2->second.Flags & SOCIAL_FLAG_FRIEND) != 0)
+        std::shared_lock<std::shared_mutex> lock(_socialMapLock);
+        for (SocialMap::const_iterator itr = _socialMap.begin(); itr != _socialMap.end(); ++itr)
         {
-            Player* target = ObjectAccessor::FindPlayer(itr->first);
-            if (!target)
-                continue;
-
-            WorldSession* session = target->GetSession();
-            if (!session->HasPermission(rbac::RBAC_PERM_WHO_SEE_ALL_SEC_LEVELS) && player->GetSession()->GetSecurity() > gmSecLevel)
-                continue;
-
-            if (target->GetTeam() != player->GetTeam() && !session->HasPermission(rbac::RBAC_PERM_TWO_SIDE_WHO_LIST))
-                continue;
-
-            if (player->IsVisibleGloballyFor(target))
-                session->SendPacket(packet);
+            PlayerSocial::PlayerSocialMap::const_iterator itr2 = itr->second._playerSocialMap.find(player->GetGUID());
+            if (itr2 != itr->second._playerSocialMap.end() && (itr2->second.Flags & SOCIAL_FLAG_FRIEND) != 0)
+                listers.push_back(itr->first);
         }
+    }
+
+    for (ObjectGuid const& listerGuid : listers)
+    {
+        Player* target = ObjectAccessor::FindPlayer(listerGuid);
+        if (!target)
+            continue;
+
+        WorldSession* session = target->GetSession();
+        if (!session->HasPermission(rbac::RBAC_PERM_WHO_SEE_ALL_SEC_LEVELS) && player->GetSession()->GetSecurity() > gmSecLevel)
+            continue;
+
+        if (target->GetTeam() != player->GetTeam() && !session->HasPermission(rbac::RBAC_PERM_TWO_SIDE_WHO_LIST))
+            continue;
+
+        if (player->IsVisibleGloballyFor(target))
+            session->SendPacket(packet);
     }
 }
 
 PlayerSocial* SocialMgr::LoadFromDB(PreparedQueryResult result, ObjectGuid const& guid)
 {
+    // @megaserver A4: guard the insert into the global _socialMap. std::map node
+    // pointers stay valid across other inserts/erases, so the returned pointer the
+    // Player holds for its session remains safe.
+    std::unique_lock<std::shared_mutex> lock(_socialMapLock);
     PlayerSocial* social = &_socialMap[guid];
     social->SetPlayerGUID(guid);
 

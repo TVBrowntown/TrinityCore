@@ -88,7 +88,10 @@ ChannelMgr::~ChannelMgr()
         channel->SetAnnounce(dbAnnounce);
         channel->SetOwnership(dbOwnership);
         channel->SetPassword(dbPass);
-        mgr->_customChannels.emplace(channelName, channel);
+        {
+            std::unique_lock<std::shared_mutex> lock(mgr->_channelLock);
+            mgr->_customChannels.emplace(channelName, channel);
+        }
 
         ++count;
     } while (result->NextRow());
@@ -146,8 +149,18 @@ Channel* ChannelMgr::GetChannelForPlayerByNamePart(std::string const& namePart, 
 
 void ChannelMgr::SaveToDB()
 {
-    for (auto pair : _customChannels)
-        pair.second->UpdateChannelInDB();
+    // snapshot the channel pointers under the lock, then persist outside it — never
+    // hold the registry lock across a Channel DB write (A4)
+    std::vector<Channel*> channels;
+    {
+        std::shared_lock<std::shared_mutex> lock(_channelLock);
+        channels.reserve(_customChannels.size());
+        for (auto const& pair : _customChannels)
+            channels.push_back(pair.second);
+    }
+
+    for (Channel* channel : channels)
+        channel->UpdateChannelInDB();
 }
 
 Channel* ChannelMgr::GetSystemChannel(uint32 channelId, AreaTableEntry const* zoneEntry)
@@ -159,6 +172,7 @@ Channel* ChannelMgr::GetSystemChannel(uint32 channelId, AreaTableEntry const* zo
 
     std::pair<uint32, uint32> key = std::make_pair(channelId, zoneId);
 
+    std::unique_lock<std::shared_mutex> lock(_channelLock);
     auto itr = _channels.find(key);
     if (itr != _channels.end())
         return itr->second;
@@ -176,6 +190,7 @@ Channel* ChannelMgr::CreateCustomChannel(std::string const& name)
 
     wstrToLower(channelName);
 
+    std::unique_lock<std::shared_mutex> lock(_channelLock);
     Channel*& c = _customChannels[channelName];
     if (c)
         return nullptr;
@@ -194,6 +209,7 @@ Channel* ChannelMgr::GetCustomChannel(std::string const& name) const
         return nullptr;
 
     wstrToLower(channelName);
+    std::shared_lock<std::shared_mutex> lock(_channelLock);
     auto itr = _customChannels.find(channelName);
     if (itr != _customChannels.end())
         return itr->second;
@@ -215,6 +231,7 @@ Channel* ChannelMgr::GetChannel(uint32 channelId, std::string const& name, Playe
 
         std::pair<uint32, uint32> key = std::make_pair(channelId, zoneId);
 
+        std::shared_lock<std::shared_mutex> lock(_channelLock);
         auto itr = _channels.find(key);
         if (itr != _channels.end())
             ret = itr->second;
@@ -228,6 +245,7 @@ Channel* ChannelMgr::GetChannel(uint32 channelId, std::string const& name, Playe
             return nullptr;
 
         wstrToLower(channelName);
+        std::shared_lock<std::shared_mutex> lock(_channelLock);
         auto itr = _customChannels.find(channelName);
         if (itr != _customChannels.end())
             ret = itr->second;
@@ -257,12 +275,13 @@ void ChannelMgr::LeftChannel(uint32 channelId, AreaTableEntry const* zoneEntry)
 
     std::pair<uint32, uint32> key = std::make_pair(channelId, zoneId);
 
+    std::unique_lock<std::shared_mutex> lock(_channelLock);
     auto itr = _channels.find(key);
     if (itr == _channels.end())
         return;
 
     Channel* channel = itr->second;
-    if (!channel->GetNumPlayers())
+    if (!channel->GetNumPlayers())   // Channel-internal read, no callback into ChannelMgr
     {
         _channels.erase(itr);
         delete channel;

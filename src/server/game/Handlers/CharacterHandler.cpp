@@ -812,6 +812,8 @@ void WorldSession::HandlePlayerLogin(LoginQueryHolder const& holder)
     data << uint32(0);
     SendPacket(&data);
 
+    pCurrChar->CreatePacketBroadcaster();
+
     pCurrChar->SendInitialPacketsBeforeAddToMap();
 
     //Show cinematic at the first time that player login

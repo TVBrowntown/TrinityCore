@@ -2734,6 +2734,22 @@ void GameObject::BuildValuesUpdate(uint8 updateType, ByteBuffer* data, Player co
     bool forcedFlags = GetGoType() == GAMEOBJECT_TYPE_CHEST && GetGOInfo()->chest.groupLootRules && HasLootRecipient();
     bool targetIsGM = target->IsGameMaster();
 
+    // @tswow-custom: a quest chest/goober the target can no longer act on (quest is set but NOT incomplete —
+    // i.e. not yet taken, complete, or rewarded) is sent GO_FLAG_NOT_SELECTABLE for that player, so it stops
+    // being clickable (no cursor, no lock "Opening" channel) the moment the objective is done — while players
+    // who are still collecting keep the normal locked, channel-on-open object. Rides the same per-player
+    // refresh as the quest sparkle (Player::UpdateVisibleGameobjectsOrSpellClicks, fired by ItemAddedQuestCheck).
+    uint32 questGoId = GetGoType() == GAMEOBJECT_TYPE_CHEST ? GetGOInfo()->chest.questId
+                     : GetGoType() == GAMEOBJECT_TYPE_GOOBER ? GetGOInfo()->goober.questId : 0;
+    // NB: applies to GMs too (no !targetIsGM) — a GM with GM-mode on would otherwise bypass the gate and the
+    // object would stay clickable for them at complete, which reads as "the gate doesn't work" while testing.
+    bool hideFinishedQuestGo = questGoId != 0
+        && target->GetQuestStatus(questGoId) != QUEST_STATUS_INCOMPLETE;
+    if (questGoId != 0)
+        forcedFlags = true;   // ALWAYS resend GAMEOBJECT_FLAGS for a quest chest/goober so NOT_SELECTABLE tracks
+                              // the quest in BOTH directions — set when done, and CLEARED again on (re)accept.
+                              // (Only forcing it when hiding leaves the flag stuck on after the quest restarts.)
+
     ByteBuffer fieldBuffer;
 
     UpdateMaskPacketBuilder updateMask(m_valuesCount);
@@ -2795,6 +2811,8 @@ void GameObject::BuildValuesUpdate(uint8 updateType, ByteBuffer* data, Player co
                 if (GetGoType() == GAMEOBJECT_TYPE_CHEST)
                     if (GetGOInfo()->chest.groupLootRules && !IsLootAllowedFor(target))
                         goFlags |= GO_FLAG_LOCKED | GO_FLAG_NOT_SELECTABLE;
+                if (hideFinishedQuestGo)   // @tswow-custom: quest done/not-active -> not clickable for this player
+                    goFlags |= GO_FLAG_NOT_SELECTABLE;
 
                 fieldBuffer << goFlags;
             }

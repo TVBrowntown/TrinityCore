@@ -992,6 +992,14 @@ m_currMap(nullptr), m_InstanceId(0), m_phaseMask(PHASEMASK_NORMAL), m_notifyflag
 
 WorldObject::~WorldObject()
 {
+    // @tswow-begin pending lua delayed-callbacks hold lua registry refs;
+    // object dtors run on map threads, so release them under the lua lock
+    if (!m_delayedLuaCallbacks.empty())
+    {
+        TSWOW_LUA_GUARD
+        m_delayedLuaCallbacks.clear();
+    }
+    // @tswow-end
     // this may happen because there are many !create/delete
     if (IsStoredInWorldObjectGridContainer() && m_currMap)
     {
@@ -1571,6 +1579,11 @@ float WorldObject::GetSightRange(WorldObject const* target) const
                 return MAX_VISIBILITY_DISTANCE;
             else if (ToPlayer()->GetCinematicMgr()->IsOnCinematic())
                 return DEFAULT_VISIBILITY_INSTANCE;
+            // player-sees-player: the adaptive per-observer count cap bounds how
+            // many other players we track in a crowd, without shrinking how far
+            // we see the world / creatures / objects (see Player::GetPlayerSightRange)
+            else if (target && target->GetTypeId() == TYPEID_PLAYER)
+                return ToPlayer()->GetPlayerSightRange(target);
             else
                 return GetMap()->GetVisibilityRange();
         }
@@ -3534,6 +3547,7 @@ void WorldObject::DestroyForNearbyPlayers()
             DestroyForPlayer(player);
 
         player->m_clientGUIDs.erase(GetGUID());
+        player->StopListeningTo(this);
     }
 }
 

@@ -16,12 +16,126 @@
  */
 
 #include "Map.h"
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+
+// @megaserver D: aggregate entity-update timing across maps, logged every 5s by
+// whichever map thread crosses the interval (file scope; used in Map::Update)
+static std::atomic<unsigned long long> s_combatNs{0};
+static std::atomic<unsigned long long> s_combatPasses{0};
+static std::atomic<uint32> s_combatLastLog{0};
+static std::atomic<unsigned long long> s_combatCells{0};        // @megaserver D: active cells
+static std::atomic<unsigned long long> s_combatParGroups{0};    // color groups run in parallel
+static std::atomic<unsigned long long> s_combatMaxGroup{0};     // largest color group seen
+
+// @megaserver D: set while a thread is inside the parallel safe-distance combat pass
+thread_local bool t_inParallelCombat = false;
+thread_local std::vector<Object*>* t_updateObjBuf = nullptr;
+
+// @megaserver D: persistent parallel-for worker pool for the combat cell-update pass.
+// Generation-based (no per-tick thread spawn). One instance per map-update-thread
+// (thread_local below), reused across colors and ticks; workers have stable indices
+// (→ stable navmesh-query slots + per-worker update buffers).
+class CombatPool
+{
+    std::vector<std::thread> _workers;
+    std::mutex _m;
+    std::condition_variable _cvGo, _cvDone;
+    uint64_t _gen = 0;
+    unsigned _doneCount = 0;
+    bool _stop = false;
+    std::function<void(unsigned, std::size_t, std::size_t)> const* _fn = nullptr;
+    std::size_t _count = 0;
+
+public:
+    ~CombatPool() { stop(); }
+    unsigned size() const { return unsigned(_workers.size()); }
+
+    void ensure(unsigned n)
+    {
+        if (_workers.size() == n)
+            return;
+        stop();
+        _stop = false;
+        _gen = 0;
+        for (unsigned i = 0; i < n; ++i)
+            _workers.emplace_back(&CombatPool::loop, this, i);
+    }
+
+    void stop()
+    {
+        if (_workers.empty())
+            return;
+        { std::lock_guard<std::mutex> lk(_m); _stop = true; ++_gen; }
+        _cvGo.notify_all();
+        for (std::thread& t : _workers)
+            t.join();
+        _workers.clear();
+    }
+
+    // split [0,count) across the workers; each runs fn(workerIdx, lo, hi); blocks until all done
+    void run(std::size_t count, std::function<void(unsigned, std::size_t, std::size_t)> const& fn)
+    {
+        unsigned const n = unsigned(_workers.size());
+        if (!n)
+            return;
+        {
+            std::lock_guard<std::mutex> lk(_m);
+            _fn = &fn; _count = count; _doneCount = 0; ++_gen;
+        }
+        _cvGo.notify_all();
+        std::unique_lock<std::mutex> lk(_m);
+        _cvDone.wait(lk, [this, n] { return _doneCount == n; });
+        _fn = nullptr;
+    }
+
+private:
+    void loop(unsigned idx)
+    {
+        uint64_t seen = 0;
+        for (;;)
+        {
+            std::function<void(unsigned, std::size_t, std::size_t)> const* fn;
+            std::size_t count;
+            unsigned n;
+            {
+                std::unique_lock<std::mutex> lk(_m);
+                _cvGo.wait(lk, [this, &seen] { return _gen != seen || _stop; });
+                if (_stop)
+                    return;
+                seen = _gen;
+                fn = _fn; count = _count; n = unsigned(_workers.size());
+            }
+            if (fn && n)
+            {
+                std::size_t const chunk = (count + n - 1) / n;
+                std::size_t const lo = std::size_t(idx) * chunk;
+                std::size_t const hi = std::min(lo + chunk, count);
+                if (lo < count)
+                {
+                    try { (*fn)(idx, lo, hi); }
+                    catch (...) { TC_LOG_ERROR("maps", "[D] combat pool worker exception"); }
+                }
+            }
+            { std::lock_guard<std::mutex> lk(_m); ++_doneCount; }
+            _cvDone.notify_all();
+        }
+    }
+};
+
+// one pool per map-update-thread; sub-workers are stable across ticks (no spawn churn)
+static thread_local CombatPool t_combatPool;
 #include "Battleground.h"
 #include "CellImpl.h"
 #include "Chat.h"
 #include "DatabaseEnv.h"
 #include "DisableMgr.h"
 #include "DynamicTree.h"
+#include "DynamicVisibility.h"
 #include "GameObjectModel.h"
 #include "GameTime.h"
 #include "GridNotifiers.h"
@@ -35,6 +149,7 @@
 #include "Metric.h"
 #include "MiscPackets.h"
 #include "MMapFactory.h"
+#include "MMapManager.h"   // @megaserver D: SetNavMeshQuerySlot
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "ObjectGridLoader.h"
@@ -616,6 +731,7 @@ bool Map::AddPlayerToMap(Player* player)
     SendInitSelf(player);
     SendInitTransports(player);
 
+    player->StopListeningToAll();
     player->m_clientGUIDs.clear();
     player->UpdateObjectVisibility(false);
 
@@ -762,6 +878,170 @@ void Map::VisitNearbyCellsOf(WorldObject* obj, TypeContainerVisitor<Trinity::Obj
     }
 }
 
+// @megaserver D: same area+marking as VisitNearbyCellsOf, but records the cell ids
+// instead of visiting them (so the visit can be batched + parallelized by color).
+void Map::CollectNearbyCellsOf(WorldObject* obj, std::vector<uint32>& outCells)
+{
+    if (!obj->IsPositionValid())
+        return;
+
+    CellArea area = Cell::CalculateCellArea(obj->GetPositionX(), obj->GetPositionY(), obj->GetGridActivationRange());
+
+    for (uint32 x = area.low_bound.x_coord; x <= area.high_bound.x_coord; ++x)
+    {
+        for (uint32 y = area.low_bound.y_coord; y <= area.high_bound.y_coord; ++y)
+        {
+            uint32 cell_id = (y * TOTAL_NUMBER_OF_CELLS_PER_MAP) + x;
+            if (isCellMarked(cell_id))
+                continue;
+            markCell(cell_id);
+            outCells.push_back(cell_id);
+        }
+    }
+}
+
+// @megaserver D: parallel entity/combat update. Collect the same active-cell set the
+// serial path would visit (players updated serially here; cells recorded), color the
+// cells by a safe-distance stride so same-color cells are >= stride cells apart (no
+// melee/short-range combat interaction can cross them), then update each color group's
+// cells concurrently with a barrier between colors. The shared ObjectUpdater is
+// stateless; distinct cells touch distinct grid containers. GATED, default off.
+void Map::UpdateEntitiesParallel(uint32 t_diff,
+    TypeContainerVisitor<Trinity::ObjectUpdater, GridTypeMapContainer>& gridVisitor,
+    TypeContainerVisitor<Trinity::ObjectUpdater, WorldTypeMapContainer>& worldVisitor)
+{
+    float const visibilityRange = GetVisibilityRange();
+    std::vector<uint32> cells;
+    cells.reserve(512);
+
+    // ---- collect phase (serial): players updated here; cells recorded, deduped ----
+    for (m_mapRefIter = m_mapRefManager.begin(); m_mapRefIter != m_mapRefManager.end(); ++m_mapRefIter)
+    {
+        Player* player = m_mapRefIter->GetSource();
+        if (!player || !player->IsInWorld())
+            continue;
+
+        player->Update(t_diff);
+        CollectNearbyCellsOf(player, cells);
+
+        if (WorldObject* viewPoint = player->GetViewpoint())
+            CollectNearbyCellsOf(viewPoint, cells);
+
+        if (player->IsInCombat())
+            for (auto const& pair : player->GetCombatManager().GetPvECombatRefs())
+                if (Creature* unit = pair.second->GetOther(player)->ToCreature())
+                    if (unit->GetMap() == this && !unit->IsWithinDistInMap(player, visibilityRange, false))
+                        CollectNearbyCellsOf(unit, cells);
+
+        {
+            std::vector<Unit*> toVisit;
+            toVisit.reserve(player->GetAppliedAuras().size());
+            for (std::pair<uint32, AuraApplication*> pair : player->GetAppliedAuras())
+                if (Unit* caster = pair.second->GetBase()->GetCaster())
+                    if (caster->GetTypeId() != TYPEID_PLAYER && caster->GetMap() == this && !caster->IsWithinDistInMap(player, visibilityRange, false))
+                        if (std::find(toVisit.begin(), toVisit.end(), caster) == toVisit.end())
+                            toVisit.push_back(caster);
+            for (Unit* unit : toVisit)
+                CollectNearbyCellsOf(unit, cells);
+        }
+
+        for (ObjectGuid const& summonGuid : player->m_SummonSlot)
+            if (summonGuid)
+                if (Creature* unit = GetCreature(summonGuid))
+                    if (unit->GetMap() == this && !unit->IsWithinDistInMap(player, visibilityRange, false))
+                        CollectNearbyCellsOf(unit, cells);
+    }
+
+    for (m_activeNonPlayersIter = m_activeNonPlayers.begin(); m_activeNonPlayersIter != m_activeNonPlayers.end();)
+    {
+        WorldObject* obj = *m_activeNonPlayersIter;
+        ++m_activeNonPlayersIter;
+        if (!obj || !obj->IsInWorld())
+            continue;
+        CollectNearbyCellsOf(obj, cells);
+    }
+
+    // ---- color phase: same-color cells are >= stride cells apart ----
+    uint32 const stride = s_combatSafeStride;
+    uint32 const ncolors = stride * stride;
+    std::vector<std::vector<uint32>> byColor(ncolors);
+    for (uint32 cid : cells)
+    {
+        uint32 const x = cid % TOTAL_NUMBER_OF_CELLS_PER_MAP;
+        uint32 const y = cid / TOTAL_NUMBER_OF_CELLS_PER_MAP;
+        byColor[(x % stride) * stride + (y % stride)].push_back(cid);
+    }
+
+    // ---- update phase: each color's cells in parallel, barrier between colors ----
+    // Hot _updateObjects inserts go into per-worker lock-free buffers (t_updateObjBuf),
+    // merged into the real set on the map thread after each color's barrier. The other
+    // (rare) deferred lists take _parallelGuard via t_inParallelCombat.
+    uint32 const nthreads = s_combatParallelThreads;
+    std::vector<std::vector<Object*>> workerBufs(std::max<uint32>(nthreads, 1u));
+
+    if (s_combatProfile)
+        s_combatCells.fetch_add(cells.size(), std::memory_order_relaxed);
+
+    // visit cells [lo,hi) of `group` on worker `idx` (its own buffer + navmesh slot idx+1)
+    auto visitChunk = [&](std::vector<uint32> const& group, unsigned idx, std::size_t lo, std::size_t hi)
+    {
+        t_inParallelCombat = true;
+        t_updateObjBuf = &workerBufs[idx];
+        MMAP::SetNavMeshQuerySlot(int(idx) + 1);   // worker idx -> slot idx+1 (slot 0 = main)
+        for (std::size_t i = lo; i < hi; ++i)
+        {
+            uint32 const cid = group[i];
+            CellCoord pair(cid % TOTAL_NUMBER_OF_CELLS_PER_MAP, cid / TOTAL_NUMBER_OF_CELLS_PER_MAP);
+            Cell cell(pair);
+            cell.SetNoCreate();
+            try
+            {
+                Visit(cell, gridVisitor);
+                Visit(cell, worldVisitor);
+            }
+            catch (std::exception const& e) { TC_LOG_ERROR("maps", "[D] parallel cell update exception: {}", e.what()); }
+            catch (...) { TC_LOG_ERROR("maps", "[D] parallel cell update unknown exception"); }
+        }
+        t_updateObjBuf = nullptr;
+        t_inParallelCombat = false;
+        MMAP::SetNavMeshQuerySlot(0);
+    };
+
+    // persistent pool (per map-update-thread); reused across colors + ticks, no spawn churn
+    t_combatPool.ensure(nthreads);
+
+    for (std::vector<uint32> const& group : byColor)
+    {
+        std::size_t const total = group.size();
+        if (!total)
+            continue;
+        for (std::vector<Object*>& b : workerBufs)
+            b.clear();
+
+        if (s_combatProfile)
+        {
+            unsigned long long prev = s_combatMaxGroup.load(std::memory_order_relaxed);
+            while (total > prev && !s_combatMaxGroup.compare_exchange_weak(prev, total)) {}
+        }
+        if (total < 4 || nthreads < 2 || t_combatPool.size() < 2)
+        {
+            visitChunk(group, 0, 0, total);   // inline → main slot... worker 0's buffer
+        }
+        else
+        {
+            std::function<void(unsigned, std::size_t, std::size_t)> fn =
+                [&visitChunk, &group](unsigned idx, std::size_t lo, std::size_t hi) { visitChunk(group, idx, lo, hi); };
+            t_combatPool.run(total, fn);
+            s_combatParGroups.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // merge per-worker update-object buffers into the real set (map thread, no lock)
+        for (std::vector<Object*>& b : workerBufs)
+            for (Object* o : b)
+                _updateObjects.insert(o);
+    }
+}
+
 void Map::UpdatePlayerZoneStats(uint32 oldZone, uint32 newZone)
 {
     // Nothing to do if no change
@@ -828,6 +1108,17 @@ void Map::Update(uint32 t_diff)
     TypeContainerVisitor<Trinity::ObjectUpdater, WorldTypeMapContainer > world_object_update(updater);
     float const visibilityRange = GetVisibilityRange();
 
+    // @megaserver D: time the entity/combat update block (the work D parallelizes)
+    std::chrono::steady_clock::time_point const _ceT0 = s_combatProfile
+        ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+
+    if (s_combatParallelThreads >= 2 &&   // @megaserver D: safe-distance parallel path (0/1 = serial)
+        CombatParallelAllowedOnMap(GetId()))   // per-map whitelist gate
+    {
+        ZoneScopedNC("EntityUpdates", MAP_UPDATE_COLOR);
+        UpdateEntitiesParallel(t_diff, grid_object_update, world_object_update);
+    }
+    else
     {
             ZoneScopedNC("EntityUpdates", MAP_UPDATE_COLOR);
         {
@@ -899,6 +1190,26 @@ void Map::Update(uint32 t_diff)
 
                 VisitNearbyCellsOf(obj, grid_object_update, world_object_update);
             }
+        }
+    }
+
+    if (s_combatProfile)
+    {
+        s_combatNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - _ceT0).count(), std::memory_order_relaxed);
+        s_combatPasses.fetch_add(1, std::memory_order_relaxed);
+        uint32 const now = getMSTime();
+        uint32 last = s_combatLastLog.load(std::memory_order_relaxed);
+        if (getMSTimeDiff(last, now) >= 5000 && s_combatLastLog.compare_exchange_strong(last, now))
+        {
+            unsigned long long const ns = s_combatNs.exchange(0, std::memory_order_relaxed);
+            unsigned long long const passes = s_combatPasses.exchange(0, std::memory_order_relaxed);
+            unsigned long long const cells = s_combatCells.exchange(0, std::memory_order_relaxed);
+            unsigned long long const pg = s_combatParGroups.exchange(0, std::memory_order_relaxed);
+            unsigned long long const mg = s_combatMaxGroup.exchange(0, std::memory_order_relaxed);
+            TC_LOG_INFO("maps", "[COMBATPROF] passes={} avg={}us avgCells={} parGroups={} maxColorGroup={}",
+                passes, passes ? (ns / 1000) / passes : 0,
+                passes ? cells / passes : 0, pg, mg);
         }
     }
 
@@ -980,6 +1291,38 @@ struct ResetNotifier
     void Visit(PlayerMapType &m) { resetNotify<Player>(m);}
 };
 
+bool Map::s_visibilityFullRescan = false;
+uint32 Map::s_visibilityParallelThreads = 0;   // @megaserver B2
+uint32 Map::s_visibilityParallelMin = 100;     // @megaserver B2
+bool Map::s_visibilityProfile = false;         // @megaserver B2 profiling
+bool Map::s_combatProfile = false;             // @megaserver D entity-update profiling
+uint32 Map::s_combatParallelThreads = 0;       // @megaserver D (0/1 = serial)
+uint32 Map::s_combatSafeStride = 3;            // @megaserver D safe-distance stride
+bool Map::s_combatParallelAllMaps = false;     // @megaserver D enable on every map
+std::unordered_set<uint32> Map::s_combatParallelMaps;  // @megaserver D map whitelist
+
+bool Map::HasMarkedCellInRange(float x, float y, float radius) const
+{
+    // NOTE: Trinity::ComputeCellCoord does NOT clamp — a negative intermediate
+    // becomes a huge uint32. Clamp to [0, LIMIT) and bounds-check the cell id,
+    // or marked_cells.test() throws std::out_of_range.
+    constexpr uint32 LIMIT = TOTAL_NUMBER_OF_CELLS_PER_MAP;
+    CellCoord lo = Trinity::ComputeCellCoord(x - radius, y - radius);
+    CellCoord hi = Trinity::ComputeCellCoord(x + radius, y + radius);
+    uint32 x0 = std::min(lo.x_coord, LIMIT - 1), x1 = std::min(hi.x_coord, LIMIT - 1);
+    uint32 y0 = std::min(lo.y_coord, LIMIT - 1), y1 = std::min(hi.y_coord, LIMIT - 1);
+    if (x0 > x1) std::swap(x0, x1);
+    if (y0 > y1) std::swap(y0, y1);
+    for (uint32 cx = x0; cx <= x1; ++cx)
+        for (uint32 cy = y0; cy <= y1; ++cy)
+        {
+            uint32 cell_id = (cy * LIMIT) + cx;
+            if (cell_id < marked_cells.size() && marked_cells.test(cell_id))
+                return true;
+        }
+    return false;
+}
+
 void Map::ProcessRelocationNotifies(const uint32 diff)
 {
     for (GridRefManager<NGridType>::iterator i = GridRefManager<NGridType>::begin(); i != GridRefManager<NGridType>::end(); ++i)
@@ -1019,6 +1362,125 @@ void Map::ProcessRelocationNotifies(const uint32 diff)
         }
     }
 
+    // @megaserver B1: full-rescan player-driven visibility. Runs AFTER the cell
+    // loop's per-grid timer TUpdate (so TPassed is current this tick) and BEFORE
+    // the reset loop's TReset. Each dirty player recomputes ONLY its own view →
+    // writes are disjoint per player, which is what Phase B2 parallelizes.
+    // The cell loop above already did creatures (players were skipped in
+    // DelayedUnitRelocation::Visit(PlayerMapType) under this flag).
+    if (s_visibilityFullRescan)
+    {
+        float const reqMoveDistSq = DynamicVisibilityMgr::GetReqMoveDistSq(GetDynamicVisibilityMapType());
+
+        // 1) collect the dirty players (serial; just the cheap gate evaluation)
+        std::vector<std::pair<Player*, bool>> dirty;   // (player, moved)
+        for (MapRefManager::iterator it = m_mapRefManager.begin(); it != m_mapRefManager.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->IsInWorld())
+                continue;
+
+            WorldObject* viewPoint = player->m_seer;
+            if (!viewPoint || !viewPoint->IsPositionValid())
+                continue;
+
+            // grid-relocation-timer throttle: only process the player when its
+            // grid is due this tick (preserves the DynamicVisibility notify period)
+            GridCoord gc = Trinity::ComputeGridCoord(viewPoint->GetPositionX(), viewPoint->GetPositionY());
+            if (!gc.IsCoordValid())   // ComputeGridCoord does not clamp; getNGrid ASSERTs
+                continue;
+            NGridType* ng = getNGrid(gc.x_coord, gc.y_coord);
+            if (!ng || ng->GetGridState() != GRID_STATE_ACTIVE || !ng->getGridInfoRef()->getRelocationTimer().TPassed())
+                continue;
+
+            bool moved = viewPoint->isNeedNotify(NOTIFY_VISIBILITY_CHANGED);
+            if (moved && player == viewPoint && player->GetExactDistSq(&player->m_lastNotifyPosition) < reqMoveDistSq)
+                moved = false;
+
+            // dirty gate: process if WE moved, or movement happened within our scan
+            // radius (a marked cell) — the latter is how a stationary observer
+            // notices an approaching/leaving neighbour without the legacy push.
+            if (!moved && !HasMarkedCellInRange(viewPoint->GetPositionX(), viewPoint->GetPositionY(), MAX_VISIBILITY_DISTANCE))
+                continue;
+
+            if (moved && player == viewPoint)
+                player->m_lastNotifyPosition.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
+
+            dirty.emplace_back(player, moved);
+        }
+
+        // 2) VISIBILITY pass — each player recomputes ONLY its own view (disjoint
+        //    writes). AI line-of-sight is suppressed here (i_playerMoved=false) so
+        //    this pass touches no creature AI and fires no lua → safe to parallelize.
+        auto visBlock = [&dirty](std::size_t lo, std::size_t hi)
+        {
+            for (std::size_t i = lo; i < hi; ++i)
+            {
+                // an exception escaping a std::thread body calls std::terminate;
+                // contain it per-player so one bad player can't crash the server
+                try
+                {
+                    Player* player = dirty[i].first;
+                    WorldObject* viewPoint = player->m_seer;
+                    Trinity::PlayerRelocationNotifier relocate(*player, false /*no AI*/);
+                    Cell::VisitAllObjects(viewPoint, relocate, MAX_VISIBILITY_DISTANCE, false);
+                    relocate.SendToSelf();
+                }
+                catch (std::exception const& e)
+                {
+                    TC_LOG_ERROR("maps", "Parallel visibility exception: {}", e.what());
+                }
+                catch (...)
+                {
+                    TC_LOG_ERROR("maps", "Parallel visibility unknown exception");
+                }
+            }
+        };
+
+        uint32 const nthreads = s_visibilityParallelThreads;
+        // @megaserver B2 PROFILING: time the visibility pass so serial vs parallel
+        // can be compared under load (logged when busy; only fires under FullRescan)
+        uint32 const _visStart = (s_visibilityProfile && dirty.size() >= 8) ? getMSTime() : 0;
+        bool const _profiled = (s_visibilityProfile && dirty.size() >= 8);
+        if (nthreads >= 2 && dirty.size() >= s_visibilityParallelMin)
+        {
+            // @megaserver B2: parallelize the disjoint-write visibility pass
+            std::size_t const total = dirty.size();
+            std::size_t const chunk = (total + nthreads - 1) / nthreads;
+            std::vector<std::thread> workers;
+            workers.reserve(nthreads);
+            for (uint32 t = 0; t < nthreads; ++t)
+            {
+                std::size_t b = std::size_t(t) * chunk;
+                if (b >= total)
+                    break;
+                workers.emplace_back(visBlock, b, std::min(b + chunk, total));
+            }
+            for (std::thread& w : workers)
+                w.join();
+        }
+        else
+        {
+            visBlock(0, dirty.size());
+        }
+        if (_profiled)
+            TC_LOG_INFO("maps", "[VISPROF] map={} dirty={} threads={} pass={}ms",
+                GetId(), uint32(dirty.size()),
+                (nthreads >= 2 && dirty.size() >= s_visibilityParallelMin) ? nthreads : 1u,
+                GetMSTimeDiffToNow(_visStart));
+
+        // 3) SERIAL AI relocation — creatures notice players that MOVED. This
+        //    mutates creature AI/threat and fires lua (OnMoveInLOS), so it must
+        //    run single-threaded, after the parallel visibility barrier.
+        for (std::pair<Player*, bool> const& d : dirty)
+        {
+            if (!d.second)
+                continue;
+            Trinity::AIRelocationNotifier notifier(*d.first);
+            Cell::VisitAllObjects(d.first, notifier, MAX_VISIBILITY_DISTANCE, false);
+        }
+    }
+
     ResetNotifier reset;
     TypeContainerVisitor<ResetNotifier, GridTypeMapContainer >  grid_notifier(reset);
     TypeContainerVisitor<ResetNotifier, WorldTypeMapContainer > world_notifier(reset);
@@ -1032,7 +1494,10 @@ void Map::ProcessRelocationNotifies(const uint32 diff)
         if (!grid->getGridInfoRef()->getRelocationTimer().TPassed())
             continue;
 
-        grid->getGridInfoRef()->getRelocationTimer().TReset(diff, m_VisibilityNotifyPeriod);
+        // configured period is the floor; DynamicVisibilityMgr raises it as
+        // the realm population grows (see Miscellaneous/DynamicVisibility.h)
+        grid->getGridInfoRef()->getRelocationTimer().TReset(diff,
+            std::max<int32>(m_VisibilityNotifyPeriod, int32(DynamicVisibilityMgr::GetVisibilityNotifyDelay(GetDynamicVisibilityMapType()))));
 
         uint32 gx = grid->getX(), gy = grid->getY();
 
@@ -1272,7 +1737,10 @@ void Map::AddCreatureToMoveList(Creature* c, float x, float y, float z, float an
         return;
 
     if (c->_moveState == MAP_OBJECT_CELL_MOVE_NONE)
-        _creaturesToMove.push_back(c);
+    {
+        if (t_inParallelCombat) { std::lock_guard<std::mutex> lk(_parallelGuard); _creaturesToMove.push_back(c); }
+        else _creaturesToMove.push_back(c);
+    }
     c->SetNewCellPosition(x, y, z, ang);
 }
 
@@ -3638,12 +4106,16 @@ void DoDelayedUpdate(TSWorldObject obj)
             callback(obj, TSMainThreadContext());
         }
 
-        for (sol::protected_function callback: obj->obj->m_delayedLuaCallbacks)
+        if (!obj->obj->m_delayedLuaCallbacks.empty())
         {
-            TSLua::handle_error(callback(obj, TSMainThreadContext()));
+            TSWOW_LUA_GUARD
+            for (sol::protected_function callback: obj->obj->m_delayedLuaCallbacks)
+            {
+                TSLua::handle_error(callback(obj, TSMainThreadContext()));
+            }
+            obj->obj->m_delayedLuaCallbacks.clear();
         }
         obj->obj->m_delayedCallbacks.clear();
-        obj->obj->m_delayedLuaCallbacks.clear();
     }
 }
 
@@ -3662,12 +4134,16 @@ void Map::DelayedUpdate(uint32 t_diff)
         callback(TSMap(this), TSMainThreadContext());
     }
 
-    for (sol::protected_function callback : m_delayLuaCallbacks)
+    if (!m_delayLuaCallbacks.empty())
     {
-        TSLua::handle_error(callback(TSMap(this), TSMainThreadContext()));
+        TSWOW_LUA_GUARD
+        for (sol::protected_function callback : m_delayLuaCallbacks)
+        {
+            TSLua::handle_error(callback(TSMap(this), TSMainThreadContext()));
+        }
+        m_delayLuaCallbacks.clear();
     }
     m_delayCallbacks.clear();
-    m_delayLuaCallbacks.clear();
 
     for (ObjectGuid guid : m_delayedGuids)
     {
@@ -3721,7 +4197,8 @@ void Map::AddObjectToRemoveList(WorldObject* obj)
 
     obj->CleanupsBeforeDelete(false);                            // remove or simplify at least cross referenced links
 
-    i_objectsToRemove.insert(obj);
+    if (t_inParallelCombat) { std::lock_guard<std::mutex> lk(_parallelGuard); i_objectsToRemove.insert(obj); }
+    else i_objectsToRemove.insert(obj);
 }
 
 void Map::AddObjectToSwitchList(WorldObject* obj, bool on)

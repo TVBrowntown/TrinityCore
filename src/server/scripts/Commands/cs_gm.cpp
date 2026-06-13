@@ -117,7 +117,7 @@ public:
         bool first = true;
         bool footer = false;
 
-        std::shared_lock<std::shared_mutex> lock(*HashMapHolder<Player>::GetLock());
+        // @megaserver A2: GetPlayers() snapshots across shards (locks internally)
         for (auto const& [playerGuid, player] : ObjectAccessor::GetPlayers())
         {
             AccountTypes playerSec = player->GetSession()->GetSecurity();

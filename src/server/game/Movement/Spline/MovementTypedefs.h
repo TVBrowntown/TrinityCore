@@ -19,6 +19,7 @@
 #define TRINITYSERVER_TYPEDEFS_H
 
 #include "Common.h"
+#include <atomic>
 
 namespace G3D
 {
@@ -44,26 +45,34 @@ namespace Movement
     float computeFallTime(float path_length, bool isSafeFall);
     float computeFallElevation(float t_passed, bool isSafeFall, float start_velocity = 0.0f);
 
+    // @megaserver D: m_counter is atomic so spline-id generation is safe when
+    // creatures pathfind/move on parallel combat-update threads. The CAS loop
+    // reproduces the original wrap-at-limit semantics exactly (TSan-confirmed race
+    // on Movement::splineIdGen via counter::Increase()).
     template<class T, T limit>
     class counter
     {
     public:
         counter() { init(); }
 
-        void Increase()
+        void Increase() { NewId(); }
+
+        T NewId()
         {
-            if (m_counter == limit)
-                init();
-            else
-                ++m_counter;
+            T cur = m_counter.load(std::memory_order_relaxed);
+            T next;
+            do
+            {
+                next = (cur == limit) ? T(0) : T(cur + 1);
+            } while (!m_counter.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+            return next;
         }
 
-        T NewId() { Increase(); return m_counter; }
-        T getCurrent() const { return m_counter; }
+        T getCurrent() const { return m_counter.load(std::memory_order_relaxed); }
 
     private:
-        void init() { m_counter = 0; }
-        T m_counter;
+        void init() { m_counter.store(0, std::memory_order_relaxed); }
+        std::atomic<T> m_counter;
     };
 
     typedef counter<uint32, 0xFFFFFFFF> UInt32Counter;

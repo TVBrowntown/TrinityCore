@@ -25,6 +25,13 @@ namespace MMAP
     constexpr char MAP_FILE_NAME_FORMAT[] = "{}mmaps/{:03}.mmap";
     constexpr char TILE_FILE_NAME_FORMAT[] = "{}mmaps/{:03}{:02}{:02}.mmtile";
 
+    // @megaserver D: per-thread navmesh-query slot (0 = main/serial thread)
+    static thread_local int t_navQuerySlot = 0;
+    void SetNavMeshQuerySlot(int slot)
+    {
+        t_navQuerySlot = (slot >= 0 && slot < NAV_QUERY_SLOTS) ? slot : 0;
+    }
+
     // ######################## MMapManager ########################
     MMapManager::~MMapManager()
     {
@@ -202,11 +209,14 @@ namespace MMAP
             return false;
 
         MMapData* mmap = loadedMMaps[mapId];
-        auto [queryItr, inserted] = mmap->navMeshQueries.try_emplace(instanceId, nullptr);
+        // @megaserver D: per-instance pool of query slots (created lazily); slot 0 eagerly
+        auto [queryItr, inserted] = mmap->navMeshQueries.try_emplace(instanceId);
         if (!inserted)
             return true;
 
-        // allocate mesh query
+        queryItr->second.assign(NAV_QUERY_SLOTS, nullptr);
+
+        // allocate slot 0's mesh query (the main/serial thread)
         dtNavMeshQuery* query = dtAllocNavMeshQuery();
         ASSERT(query);
         if (dtStatusFailed(query->init(mmap->navMesh, 1024)))
@@ -218,7 +228,7 @@ namespace MMAP
         }
 
         TC_LOG_DEBUG("maps", "MMAP:GetNavMeshQuery: created dtNavMeshQuery for mapId {:03} instanceId {}", mapId, instanceId);
-        queryItr->second = query;
+        queryItr->second[0] = query;
         return true;
     }
 
@@ -317,7 +327,9 @@ namespace MMAP
             return false;
         }
 
-        dtFreeNavMeshQuery(queryItr->second);
+        for (dtNavMeshQuery* q : queryItr->second)   // @megaserver D: free all slot queries
+            if (q)
+                dtFreeNavMeshQuery(q);
         mmap->navMeshQueries.erase(queryItr);
         TC_LOG_DEBUG("maps", "MMAP:unloadMapInstance: Unloaded mapId {:03} instanceId {}", mapId, instanceId);
 
@@ -343,6 +355,25 @@ namespace MMAP
         if (queryItr == itr->second->navMeshQueries.end())
             return nullptr;
 
-        return queryItr->second;
+        // @megaserver D: return the calling thread's slot query. Slot 0 (main) is created
+        // eagerly in loadMapInstance; parallel-worker slots are created lazily here. Each
+        // slot is used by exactly one thread at a time (workers are barrier-serialized
+        // across ticks), and distinct slots are distinct vector elements in a pre-sized
+        // vector, so concurrent lazy creation of different slots needs no lock.
+        std::vector<dtNavMeshQuery*>& pool = queryItr->second;
+        int const slot = (t_navQuerySlot >= 0 && t_navQuerySlot < int(pool.size())) ? t_navQuerySlot : 0;
+        if (dtNavMeshQuery* q = pool[slot])
+            return q;
+
+        // lazily create this slot's query against the shared (read-only) navmesh
+        dtNavMeshQuery* query = dtAllocNavMeshQuery();
+        if (!query || dtStatusFailed(query->init(itr->second->navMesh, 1024)))
+        {
+            if (query)
+                dtFreeNavMeshQuery(query);
+            return pool[0];   // fall back to the main query
+        }
+        pool[slot] = query;
+        return query;
     }
 }

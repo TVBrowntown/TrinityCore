@@ -30,6 +30,7 @@ GuildMgr::~GuildMgr() = default;
 
 void GuildMgr::AddGuild(Guild* guild)
 {
+    std::unique_lock<std::shared_mutex> lock(_guildStoreLock);
     Trinity::unique_trackable_ptr<Guild>& ptr = GuildStore[guild->GetId()];
     ptr.reset(guild);
     guild->SetWeakPtr(ptr);
@@ -37,22 +38,24 @@ void GuildMgr::AddGuild(Guild* guild)
 
 void GuildMgr::RemoveGuild(ObjectGuid::LowType guildId)
 {
+    std::unique_lock<std::shared_mutex> lock(_guildStoreLock);
     GuildStore.erase(guildId);
 }
 
 ObjectGuid::LowType GuildMgr::GenerateGuildId()
 {
-    if (NextGuildId >= 0xFFFFFFFE)
+    if (NextGuildId.load() >= 0xFFFFFFFE)
     {
         TC_LOG_ERROR("guild", "Guild ids overflow!! Can't continue, shutting down server. ");
         World::StopNow(ERROR_EXIT_CODE);
     }
-    return NextGuildId++;
+    return NextGuildId++;   // atomic post-increment
 }
 
 // Guild collection
 Guild* GuildMgr::GetGuildById(ObjectGuid::LowType guildId) const
 {
+    std::shared_lock<std::shared_mutex> lock(_guildStoreLock);
     GuildContainer::const_iterator itr = GuildStore.find(guildId);
     if (itr != GuildStore.end())
         return itr->second.get();
@@ -62,6 +65,7 @@ Guild* GuildMgr::GetGuildById(ObjectGuid::LowType guildId) const
 
 Guild* GuildMgr::GetGuildByName(std::string_view guildName) const
 {
+    std::shared_lock<std::shared_mutex> lock(_guildStoreLock);
     for (auto const& [id, guild] : GuildStore)
         if (StringEqualI(guild->GetName(), guildName))
             return guild.get();
@@ -85,6 +89,7 @@ GuildMgr* GuildMgr::instance()
 
 Guild* GuildMgr::GetGuildByLeader(ObjectGuid guid) const
 {
+    std::shared_lock<std::shared_mutex> lock(_guildStoreLock);
     for (GuildContainer::const_iterator itr = GuildStore.begin(); itr != GuildStore.end(); ++itr)
         if (itr->second->GetLeaderGUID() == guid)
             return itr->second.get();
@@ -399,9 +404,19 @@ void GuildMgr::LoadGuilds()
 
 void GuildMgr::ResetTimes()
 {
-    for (GuildContainer::const_iterator itr = GuildStore.begin(); itr != GuildStore.end(); ++itr)
-        if (Guild* guild = itr->second.get())
-            guild->ResetTimes();
+    // snapshot the guild pointers under the store lock, then release it before
+    // calling into Guild — never hold the manager lock across a Guild method (A4)
+    std::vector<Guild*> guilds;
+    {
+        std::shared_lock<std::shared_mutex> lock(_guildStoreLock);
+        guilds.reserve(GuildStore.size());
+        for (GuildContainer::const_iterator itr = GuildStore.begin(); itr != GuildStore.end(); ++itr)
+            if (Guild* guild = itr->second.get())
+                guilds.push_back(guild);
+    }
+
+    for (Guild* guild : guilds)
+        guild->ResetTimes();
 
     CharacterDatabase.DirectExecute("TRUNCATE guild_member_withdraw");
 }

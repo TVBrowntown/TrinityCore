@@ -47,6 +47,10 @@
 #include "CreatureTextMgr.h"
 #include "DatabaseEnv.h"
 #include "DisableMgr.h"
+#include "DynamicVisibility.h"
+#include "MovementBroadcaster.h"
+#include "Map.h"
+#include "PlayerBroadcaster.h"
 #include "GameEventMgr.h"
 #include "GameObjectModel.h"
 #include "GameTime.h"
@@ -94,6 +98,134 @@
 #include "WeatherMgr.h"
 #include "WhoListStorage.h"
 #include "WorldSession.h"
+#include "ProducerConsumerQueue.h"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+// @megaserver C: parallel session pre-pass config (file scope; set at config load)
+static uint32 s_sessionParallelThreads = 0;
+static uint32 s_sessionParallelMin = 50;
+// @megaserver A3: defer the packet-observer hooks during the parallel pass so the
+// query workers don't take the global lua lock (fired on the main thread after join)
+static bool s_sessionDeferHooks = true;
+static bool s_combatValidateOn = false;   // @megaserver D outcome-diff
+// @megaserver C: parallel-pass profiling (wall-time of the pass; [SESSPROF] every 5s)
+static std::atomic<unsigned long long> s_sessPassNs{0};
+static std::atomic<unsigned long long> s_sessPassCount{0};
+static std::atomic<unsigned long long> s_sessPassSessions{0};
+
+// @megaserver C/Step2: persistent worker pool for the parallel session pass — modeled
+// on MapUpdater (ProducerConsumerQueue + pending-counter + condvar). Removes the
+// per-tick std::thread spawn cost (measured to dominate: avgPass scaled with thread
+// COUNT, not work). Each worker owns a reusable deferred-hook buffer; the main thread
+// drains them after each pass.
+class SessionUpdater
+{
+    struct Request { std::vector<WorldSession*> const* sessions; std::size_t begin, end; uint32 diff; };
+    ProducerConsumerQueue<Request*> _queue;
+    std::vector<std::thread> _threads;
+    std::vector<DeferredPacketHooks*> _buffers;
+    std::mutex _lock;
+    std::condition_variable _cond;
+    std::atomic<bool> _cancel{false};
+    std::size_t _pending = 0;
+    bool _defer = false;
+
+public:
+    ~SessionUpdater() { deactivate(); }
+    bool activated() const { return !_threads.empty(); }
+    std::size_t size() const { return _threads.size(); }
+
+    void activate(std::size_t n, bool defer)
+    {
+        _defer = defer;
+        _cancel = false;
+        _buffers.assign(defer ? n : 0, nullptr);
+        if (defer)
+            for (std::size_t i = 0; i < n; ++i)
+                _buffers[i] = CreateDeferredHookBuffer();
+        for (std::size_t i = 0; i < n; ++i)
+            _threads.emplace_back(&SessionUpdater::worker, this, i);
+    }
+
+    void deactivate()
+    {
+        if (_threads.empty())
+            return;
+        _cancel = true;
+        _queue.Cancel();
+        for (std::thread& t : _threads)
+            t.join();
+        _threads.clear();
+        for (DeferredPacketHooks* b : _buffers)
+            FireAndDestroyDeferredHookBuffer(b);   // buffers are empty when idle
+        _buffers.clear();
+    }
+
+    // split the snapshot into one range per worker, dispatch, block until all done,
+    // then drain the deferred-hook buffers on the calling (main) thread
+    void run(std::vector<WorldSession*> const& snapshot, uint32 diff)
+    {
+        std::size_t const n = _threads.size();
+        if (!n)
+            return;
+        std::size_t const total = snapshot.size();
+        std::size_t const chunk = (total + n - 1) / n;
+        {
+            std::lock_guard<std::mutex> lk(_lock);
+            for (std::size_t b = 0; b < total; b += chunk)
+            {
+                ++_pending;
+                _queue.Push(new Request{ &snapshot, b, std::min(b + chunk, total), diff });
+            }
+        }
+        {
+            std::unique_lock<std::mutex> lk(_lock);
+            _cond.wait(lk, [this]{ return _pending == 0; });
+        }
+        if (_defer)
+            for (DeferredPacketHooks* b : _buffers)
+                FireDeferredHookBuffer(b);
+    }
+
+private:
+    void worker(std::size_t id)
+    {
+        if (_defer)
+            t_deferredPacketHooks = _buffers[id];   // persistent per-worker buffer
+        for (;;)
+        {
+            Request* r = nullptr;
+            _queue.WaitAndPop(r);
+            if (_cancel)
+                return;
+            for (std::size_t i = r->begin; i < r->end; ++i)
+            {
+                WorldSession* s = (*r->sessions)[i];
+                try
+                {
+                    ParallelSessionFilter filter(s);
+                    s->Update(r->diff, filter);
+                }
+                catch (...)
+                {
+                    TC_LOG_ERROR("misc", "Parallel session update exception");
+                }
+            }
+            delete r;
+            {
+                std::lock_guard<std::mutex> lk(_lock);
+                --_pending;
+                _cond.notify_all();
+            }
+        }
+    }
+};
 
 #include <boost/asio/ip/address.hpp>
 
@@ -160,6 +292,9 @@ World::World()
 /// World destructor
 World::~World()
 {
+    // join movement broadcaster threads before sessions/sockets go away
+    MovementBroadcaster::Shutdown();
+
     ///- Empty the kicked session set
     while (!m_sessions.empty())
     {
@@ -1469,13 +1604,12 @@ void World::LoadConfigSettings(bool reload)
     m_bool_configs[CONFIG_SHOW_KICK_IN_WORLD] = sConfigMgr->GetBoolDefault("ShowKickInWorld", false);
     m_bool_configs[CONFIG_SHOW_MUTE_IN_WORLD] = sConfigMgr->GetBoolDefault("ShowMuteInWorld", false);
     m_bool_configs[CONFIG_SHOW_BAN_IN_WORLD] = sConfigMgr->GetBoolDefault("ShowBanInWorld", false);
-    // @tswow-begin - only allow one thread if using lua
+    // @tswow-begin - lua execution is serialized by a global recursive mutex
+    // (tswow_lua_mutex in TSLua.h), so multithreaded map updates are safe:
+    // non-lua map work parallelizes, lua handlers run one at a time.
     uint32 mapUpdateThreads = m_int_configs[CONFIG_NUMTHREADS] = sConfigMgr->GetIntDefault("MapUpdate.Threads", 1);
     if (m_bool_configs[CONFIG_TSWOW_LUA_ENABLED] && mapUpdateThreads > 1)
-    {
-        m_int_configs[CONFIG_NUMTHREADS] = 1;
-        TC_LOG_ERROR("server.loading", "MapUpdate.Threads cannot be %i when TSWoW Lua is enabled. Set to 1.", mapUpdateThreads);
-    }
+        TC_LOG_INFO("server.loading", "MapUpdate.Threads = {} with TSWoW Lua enabled: lua handlers are serialized by a global lock.", mapUpdateThreads);
     // @tswow-end
     m_int_configs[CONFIG_MAX_RESULTS_LOOKUP_COMMANDS] = sConfigMgr->GetIntDefault("Command.LookupMaxResults", 0);
 
@@ -2324,6 +2458,73 @@ void World::SetInitialWorldSettings()
 
     uint32 startupDuration = GetMSTimeDiffToNow(startupBegin);
 
+    // movement broadcaster (vmangos port): relay player movement packets
+    // from dedicated threads; 0 threads = disabled (legacy map-thread relay)
+    MovementBroadcaster::Initialize(
+        sConfigMgr->GetIntDefault("Network.PacketBroadcast.Threads", 2),
+        std::chrono::milliseconds(sConfigMgr->GetIntDefault("Network.PacketBroadcast.Frequency", 50)));
+    // interest-management throttling: thin distant observers' heartbeats once a
+    // player is seen by a crowd (near observers + targeters always full)
+    PlayerBroadcaster::ConfigureThrottle(
+        sConfigMgr->GetBoolDefault("Network.PacketBroadcast.Throttle", true),
+        sConfigMgr->GetIntDefault("Network.PacketBroadcast.Throttle.MinListeners", 50),
+        sConfigMgr->GetFloatDefault("Network.PacketBroadcast.Throttle.FullRange", 20.0f),
+        sConfigMgr->GetFloatDefault("Network.PacketBroadcast.Throttle.CoarseRange", 45.0f));
+
+    // adaptive per-observer player-visibility cap: bounds how many other players
+    // each observer tracks in a packed zone, without shrinking world view
+    Player::ConfigurePlayerCap(
+        sConfigMgr->GetBoolDefault("Visibility.PlayerCap.Enable", true),
+        sConfigMgr->GetIntDefault("Visibility.PlayerCap.MaxVisible", 300),
+        sConfigMgr->GetFloatDefault("Visibility.PlayerCap.MinRadius", 20.0f),
+        sConfigMgr->GetIntDefault("Visibility.PlayerCap.ZoneGate", 400));
+
+    // @megaserver B1: player-driven full-rescan visibility (default off = legacy path)
+    Map::SetVisibilityFullRescan(sConfigMgr->GetBoolDefault("Visibility.FullRescan", false));
+    Map::SetVisibilityParallel(
+        sConfigMgr->GetIntDefault("Visibility.ParallelThreads", 0),
+        sConfigMgr->GetIntDefault("Visibility.ParallelMinPlayers", 100),
+        sConfigMgr->GetBoolDefault("Visibility.ParallelProfile", false));
+
+    // @megaserver A3: optional global lua-lock contention profiling
+    TSLuaProfileSet(sConfigMgr->GetBoolDefault("LuaLock.Profile", false));
+
+    // @megaserver C: parallel session pre-pass (read-only query opcodes)
+    s_sessionParallelThreads = sConfigMgr->GetIntDefault("Sessions.ParallelThreads", 0);
+    s_sessionParallelMin = sConfigMgr->GetIntDefault("Sessions.ParallelMinSessions", 50);
+    s_sessionDeferHooks = sConfigMgr->GetBoolDefault("Sessions.DeferPacketHooks", true);
+
+    // @megaserver D harness: immortal players for combat load testing (default off)
+    SetCombatLoadGenImmortalPlayers(sConfigMgr->GetBoolDefault("CombatLoadGen.ImmortalPlayers", false));
+    Map::SetCombatProfile(sConfigMgr->GetBoolDefault("CombatLoadGen.Profile", false));
+
+    // @megaserver D: parallel combat/entity update (safe-distance cell coloring).
+    Map::SetCombatParallel(
+        sConfigMgr->GetIntDefault("Combat.ParallelThreads", 0),
+        sConfigMgr->GetIntDefault("Combat.SafeStride", 3));
+    // Combat.ParallelMaps = comma-separated map-id whitelist the parallel path may run on
+    // ("*" or "-1" = all maps). The 200yd safe distance is insufficient on maps with
+    // long-range (200–1000yd) damage spells — siege BGs, vehicle/raid bosses (SpellRange
+    // sweep) — so D is restricted to verified-safe maps. Default: open-world continents
+    // Eastern Kingdoms (0) + Kalimdor (1).
+    {
+        std::string maps = sConfigMgr->GetStringDefault("Combat.ParallelMaps", "0,1");
+        bool allMaps = (maps == "*" || maps == "-1");
+        std::unordered_set<uint32> mapSet;
+        if (!allMaps)
+            for (std::string_view tok : Trinity::Tokenize(maps, ',', false))
+                if (Optional<uint32> id = Trinity::StringTo<uint32>(tok))
+                    mapSet.insert(*id);
+        Map::SetCombatParallelMaps(allMaps, std::move(mapSet));
+    }
+
+    // @megaserver D outcome-diff: safe-distance interaction monitor. safe distance =
+    // stride * SIZE_OF_GRID_CELL (533.3333/8 = 66.6667yd) — the min separation of two
+    // same-color cells. If no interaction reaches it, parallel == serial.
+    s_combatValidateOn = sConfigMgr->GetBoolDefault("Combat.Validate", false);
+    SetCombatValidate(s_combatValidateOn,
+        float(sConfigMgr->GetIntDefault("Combat.SafeStride", 3)) * 66.6667f);
+
     TC_LOG_INFO("server.worldserver", "World initialized in {} minutes {} seconds", (startupDuration / 60000), ((startupDuration % 60000) / 1000));
 
     TC_METRIC_EVENT("events", "World initialized", "World initialized in " + std::to_string(startupDuration / 60000) + " minutes " + std::to_string((startupDuration % 60000) / 1000) + " seconds");
@@ -2415,11 +2616,54 @@ void World::Update(uint32 diff)
     ZoneScopedC(WORLD_UPDATE_COLOR)
     clear_lua_garbage();
     TC_METRIC_TIMER("world_update_time_total");
+
+    // @megaserver A3: dump global lua-lock contention every 5s when profiling on
+    if (g_tswowLuaProfile || s_combatValidateOn)
+    {
+        static uint32 s_luaProfAccum = 0;
+        s_luaProfAccum += diff;
+        if (s_luaProfAccum >= 5000)
+        {
+            s_luaProfAccum = 0;
+            if (g_tswowLuaProfile)
+            {
+                unsigned long long acq, con, waitNs, heldNs;
+                TSLuaProfileGet(acq, con, waitNs, heldNs);
+                TC_LOG_INFO("server.worldserver",
+                    "[LUAPROF] acquires={} contended={} ({}%) waited={}ms held={}ms",
+                    acq, con, acq ? (con * 100 / acq) : 0,
+                    waitNs / 1000000, heldNs / 1000000);
+
+                // @megaserver C: parallel-pass timing over the same window (then reset)
+                unsigned long long passNs = s_sessPassNs.exchange(0, std::memory_order_relaxed);
+                unsigned long long passCnt = s_sessPassCount.exchange(0, std::memory_order_relaxed);
+                unsigned long long passSess = s_sessPassSessions.exchange(0, std::memory_order_relaxed);
+                if (passCnt)
+                    TC_LOG_INFO("server.worldserver",
+                        "[SESSPROF] threads={} passes={} totalPass={}ms avgPass={}us avgSessions={}",
+                        s_sessionParallelThreads, passCnt, passNs / 1000000,
+                        (passNs / 1000) / passCnt, passSess / passCnt);
+            }
+
+            // @megaserver D outcome-diff: max combat-interaction distance vs safe distance
+            if (s_combatValidateOn)
+            {
+                unsigned long long ic, iv; uint32 md;
+                GetCombatValidateStats(ic, iv, md);
+                TC_LOG_INFO("server.worldserver",
+                    "[COMBATVALIDATE] interactions={} maxDist={}yd safeDist~200yd violations(>=safe)={} -> {}",
+                    ic, md, iv, iv == 0 ? "SAFE (parallel==serial)" : "POTENTIAL REORDER HAZARD");
+            }
+        }
+    }
     ///- Update the game time and check for shutdown time
     _UpdateGameTime();
     time_t currentGameTime = GameTime::GetGameTime();
 
     sWorldUpdateTime.UpdateWithDiff(diff);
+
+    // scale visibility notify rates with realm population
+    DynamicVisibilityMgr::Update(GetActiveSessionCount());
 
     ///- Update the different timers
     for (int i = 0; i < WUPDATE_COUNT; ++i)
@@ -3201,6 +3445,45 @@ void World::UpdateSessions(uint32 diff)
         WorldSession* sess = nullptr;
         while (addSessQueue.next(sess))
             AddSession_(sess);
+    }
+
+    // @megaserver C: parallel pre-pass — drain the audited read-only query opcodes
+    // (ParallelSessionFilter) across worker threads before the serial lifecycle loop.
+    // session->Update from a worker thread is the same pattern the map phase already
+    // uses (MapSessionFilter); ProcessUnsafe()=false means no logout/erase happens
+    // here — that stays in the serial loop below. Gated; default off (threads=0).
+    if (s_sessionParallelThreads >= 2 && m_sessions.size() >= s_sessionParallelMin)
+    {
+        std::chrono::steady_clock::time_point const _passT0 = std::chrono::steady_clock::now();
+        // Only sessions whose player is fully IN WORLD are eligible — exactly the
+        // map-phase contract. Logging-in / no-player / loading sessions are left to
+        // the serial loop; touching them here (their login DB callbacks fire via
+        // ProcessQueryCallbacks) would race the main-thread login flow.
+        std::vector<WorldSession*> snapshot;
+        snapshot.reserve(m_sessions.size());
+        for (std::pair<uint32 const, WorldSession*> const& kv : m_sessions)
+        {
+            WorldSession* s = kv.second;
+            if (s && s->GetPlayer() && s->GetPlayer()->IsInWorld())
+                snapshot.push_back(s);
+        }
+
+        // @megaserver C/Step2: persistent worker pool (activated once; survives across
+        // ticks so there's no per-pass thread spawn). Re-activate only if the configured
+        // thread count changed.
+        static SessionUpdater s_sessionUpdater;
+        if (!s_sessionUpdater.activated() || s_sessionUpdater.size() != s_sessionParallelThreads)
+        {
+            s_sessionUpdater.deactivate();
+            s_sessionUpdater.activate(s_sessionParallelThreads, s_sessionDeferHooks);
+        }
+        s_sessionUpdater.run(snapshot, diff);
+
+        unsigned long long const _passNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - _passT0).count();
+        s_sessPassNs.fetch_add(_passNs, std::memory_order_relaxed);
+        s_sessPassCount.fetch_add(1, std::memory_order_relaxed);
+        s_sessPassSessions.fetch_add(snapshot.size(), std::memory_order_relaxed);
     }
 
     ///- Then send an update signal to remaining ones

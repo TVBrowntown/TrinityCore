@@ -34,6 +34,7 @@
 #include "Transaction.h"
 #include "UniqueTrackablePtr.h"
 #include <bitset>
+#include <unordered_set>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -76,6 +77,15 @@ enum WeatherState : uint32;
 namespace Trinity { struct ObjectUpdater; }
 namespace VMAP { enum class ModelIgnoreFlags : uint32; }
 namespace G3D { class Plane; }
+
+// @megaserver D: true while a thread is inside the parallel safe-distance combat
+// pass. Map's shared deferred lists (move/remove/active lists) take the map's
+// _parallelGuard only when this is set — zero overhead on the serial path.
+TC_GAME_API extern thread_local bool t_inParallelCombat;
+// @megaserver D: per-worker buffer for the HOT _updateObjects inserts (every combat
+// field-change). When set, AddUpdateObject appends here lock-free; the map thread
+// merges all workers' buffers into _updateObjects after the parallel barrier.
+TC_GAME_API extern thread_local std::vector<Object*>* t_updateObjBuf;
 
 struct ScriptAction
 {
@@ -485,6 +495,17 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
         bool IsBattlegroundOrArena() const;
         bool GetEntrancePos(int32& mapid, float& x, float& y) const;
 
+        // index into the DynamicVisibilityMgr settings table:
+        // 0=common, 1=instance, 2=raid, 3=bg, 4=arena
+        uint8 GetDynamicVisibilityMapType() const
+        {
+            if (IsBattleArena()) return 4;
+            if (IsBattleground()) return 3;
+            if (IsRaid()) return 2;
+            if (IsDungeon()) return 1;
+            return 0;
+        }
+
         void AddObjectToRemoveList(WorldObject* obj);
         void AddObjectToSwitchList(WorldObject* obj, bool on);
         virtual void DelayedUpdate(uint32 diff);
@@ -492,6 +513,31 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
         void resetMarkedCells() { marked_cells.reset(); }
         bool isCellMarked(uint32 pCellId) { return marked_cells.test(pCellId); }
         void markCell(uint32 pCellId) { marked_cells.set(pCellId); }
+
+        // @megaserver B1: full-rescan visibility (config Visibility.FullRescan).
+        // When on, ProcessRelocationNotifies recomputes each dirty player's view
+        // in a player-driven pass (disjoint writes → Phase B2 parallelizes it).
+        static bool IsVisibilityFullRescan() { return s_visibilityFullRescan; }
+        static void SetVisibilityFullRescan(bool on) { s_visibilityFullRescan = on; }
+        // @megaserver B2: parallelize the disjoint-write visibility pass across
+        // `threads` workers once at least `minPlayers` players are dirty.
+        static void SetVisibilityParallel(uint32 threads, uint32 minPlayers, bool profile = false)
+        { s_visibilityParallelThreads = threads; s_visibilityParallelMin = minPlayers; s_visibilityProfile = profile; }
+        // @megaserver D: profile the per-tick entity/combat update ([COMBATPROF])
+        static void SetCombatProfile(bool on) { s_combatProfile = on; }
+        // @megaserver D: parallel entity/combat update via safe-distance cell coloring.
+        static void SetCombatParallel(uint32 threads, uint32 stride)
+        { s_combatParallelThreads = threads; s_combatSafeStride = stride ? stride : 3; }
+        // Whitelist of map ids the parallel path may run on (allMaps=true => everywhere).
+        // The 200yd safe distance is NOT sufficient on maps with long-range (200–1000yd)
+        // damage spells — siege BGs, vehicle/raid bosses (confirmed via the SpellRange
+        // sweep) — so D is restricted to verified-safe maps (e.g. open-world continents).
+        static void SetCombatParallelMaps(bool allMaps, std::unordered_set<uint32> maps)
+        { s_combatParallelAllMaps = allMaps; s_combatParallelMaps = std::move(maps); }
+        static bool CombatParallelAllowedOnMap(uint32 mapId)
+        { return s_combatParallelAllMaps || s_combatParallelMaps.count(mapId) != 0; }
+        // dirty-gate: is any movement-marked cell within `radius` of (x,y)?
+        bool HasMarkedCellInRange(float x, float y, float radius) const;
 
         bool HavePlayers() const { return !m_mapRefManager.isEmpty(); }
         uint32 GetPlayersCountExceptGMs() const;
@@ -658,12 +704,15 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
 
         void AddUpdateObject(Object* obj)
         {
-            _updateObjects.insert(obj);
+            if (t_updateObjBuf) { t_updateObjBuf->push_back(obj); return; }  // lock-free worker buffer
+            if (t_inParallelCombat) { std::lock_guard<std::mutex> lk(_parallelGuard); _updateObjects.insert(obj); }
+            else _updateObjects.insert(obj);
         }
 
         void RemoveUpdateObject(Object* obj)
         {
-            _updateObjects.erase(obj);
+            if (t_inParallelCombat) { std::lock_guard<std::mutex> lk(_parallelGuard); _updateObjects.erase(obj); }
+            else _updateObjects.erase(obj);
         }
 
         size_t GetActiveNonPlayersCount() const
@@ -738,6 +787,23 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
         float m_VisibleDistance;
         DynamicMapTree _dynamicTree;
 
+        static bool s_visibilityFullRescan;       // @megaserver B1
+        static uint32 s_visibilityParallelThreads; // @megaserver B2 (0/1 = serial)
+        static uint32 s_visibilityParallelMin;     // @megaserver B2
+        static bool s_visibilityProfile;           // @megaserver B2 profiling
+        static bool s_combatProfile;               // @megaserver D entity-update profiling
+        static uint32 s_combatParallelThreads;     // @megaserver D (0/1 = serial)
+        static uint32 s_combatSafeStride;          // @megaserver D safe-distance cell stride
+        static bool s_combatParallelAllMaps;       // @megaserver D enable on every map
+        static std::unordered_set<uint32> s_combatParallelMaps;  // @megaserver D map whitelist
+
+        // @megaserver D: collect (mark + record) the active cells around an object
+        // without visiting them, and the parallel safe-distance entity-update path
+        void CollectNearbyCellsOf(WorldObject* obj, std::vector<uint32>& outCells);
+        void UpdateEntitiesParallel(uint32 t_diff,
+            TypeContainerVisitor<Trinity::ObjectUpdater, GridTypeMapContainer>& gridVisitor,
+            TypeContainerVisitor<Trinity::ObjectUpdater, WorldTypeMapContainer>& worldVisitor);
+
         MapRefManager m_mapRefManager;
         MapRefManager::iterator m_mapRefIter;
 
@@ -784,6 +850,10 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
 
         typedef std::multimap<time_t, ScriptAction> ScriptScheduleMap;
         ScriptScheduleMap m_scriptSchedule;
+
+        // @megaserver D: guards this map's shared deferred lists during the parallel
+        // combat pass (held only when t_inParallelCombat — uncontended otherwise)
+        std::mutex _parallelGuard;
 
     public:
         void ProcessRespawns();
@@ -850,11 +920,19 @@ class TC_GAME_API Map : public GridRefManager<NGridType>
 
         void AddToActiveHelper(WorldObject* obj)
         {
-            m_activeNonPlayers.insert(obj);
+            if (t_inParallelCombat) { std::lock_guard<std::mutex> lk(_parallelGuard); m_activeNonPlayers.insert(obj); }
+            else m_activeNonPlayers.insert(obj);
         }
 
         void RemoveFromActiveHelper(WorldObject* obj)
         {
+            // @megaserver D: during the parallel pass the active-iterator is at end()
+            if (t_inParallelCombat)
+            {
+                std::lock_guard<std::mutex> lk(_parallelGuard);
+                m_activeNonPlayers.erase(obj);
+                return;
+            }
             // Map::Update for active object in proccess
             if (m_activeNonPlayersIter != m_activeNonPlayers.end())
             {

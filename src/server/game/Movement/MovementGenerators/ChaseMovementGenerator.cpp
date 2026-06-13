@@ -108,13 +108,27 @@ Position ChaseMovementGenerator::PredictTargetPosition(Unit* owner, Unit* target
     G3D::Vector3 const& velocity = GetTargetVelocity();
     float targetSpeed = velocity.length();
 
-    // BEHAVIOR 1: Target is stationary or moving very slowly
-    // In this case, just approach directly - no prediction needed
-    if (!HasVelocityData() || targetSpeed < 0.5f)
-    {
-        // Simply return current position - the pathfinding system will handle approach
+    // BEHAVIOR 1: Hysteresis-gated predictive mode.
+    // Enable predictive pursuit only once target sustainedly moves fast (>= ENABLE),
+    // and stay in predictive mode until they slow well below it (< DISABLE).
+    // The deadband prevents micro speed wobbles from snapping between
+    // "no prediction" and "full prediction" mid-fight.
+    if (!HasVelocityData())
         return current;
+
+    if (_predictiveActive)
+    {
+        if (targetSpeed < PREDICT_DISABLE_SPEED)
+            _predictiveActive = false;
     }
+    else
+    {
+        if (targetSpeed >= PREDICT_ENABLE_SPEED)
+            _predictiveActive = true;
+    }
+
+    if (!_predictiveActive)
+        return current;
 
     // BEHAVIOR 2: Target is moving - use predictive interception
 

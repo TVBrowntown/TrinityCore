@@ -38,7 +38,7 @@ std::mutex s_corpseViewersMutex;
 // AOE loot configuration
 const uint32 AOE_MAX_CORPSES = 10;
 const uint32 AOE_MAX_DISPLAYED_ITEMS = 18;  // 3.3.5a client limit
-const uint32 AOE_MERGE_COOLDOWN = 1;        // Seconds between merges (anti-spam)
+const uint32 AOE_MERGE_COOLDOWN = 0;        // Seconds between merges (0 = no throttle; the 1s default caused single-corpse loot windows on rapid kills — symptom: "loot window opens but only shows one corpse sometimes")
 
 struct LootItemWithPriority
 {

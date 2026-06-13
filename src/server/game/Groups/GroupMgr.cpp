@@ -37,6 +37,7 @@ GroupMgr::~GroupMgr()
 
 uint32 GroupMgr::GenerateNewGroupDbStoreId()
 {
+    std::lock_guard<std::mutex> lock(_dbStoreLock);
     uint32 newStorageId = NextGroupDbStoreId;
 
     for (uint32 i = ++NextGroupDbStoreId; i < 0xFFFFFFFF; ++i)
@@ -59,6 +60,7 @@ uint32 GroupMgr::GenerateNewGroupDbStoreId()
 
 void GroupMgr::RegisterGroupDbStoreId(uint32 storageId, Group* group)
 {
+    std::lock_guard<std::mutex> lock(_dbStoreLock);
     // Allocate space if necessary.
     if (storageId >= uint32(GroupDbStore.size()))
         GroupDbStore.resize(storageId + 1);
@@ -68,6 +70,7 @@ void GroupMgr::RegisterGroupDbStoreId(uint32 storageId, Group* group)
 
 void GroupMgr::FreeGroupDbStoreId(Group* group)
 {
+    std::lock_guard<std::mutex> lock(_dbStoreLock);
     uint32 storageId = group->GetDbStoreId();
 
     if (storageId < NextGroupDbStoreId)
@@ -78,6 +81,7 @@ void GroupMgr::FreeGroupDbStoreId(Group* group)
 
 Group* GroupMgr::GetGroupByDbStoreId(uint32 storageId) const
 {
+    std::lock_guard<std::mutex> lock(_dbStoreLock);
     if (storageId < GroupDbStore.size())
         return GroupDbStore[storageId];
 
@@ -86,12 +90,12 @@ Group* GroupMgr::GetGroupByDbStoreId(uint32 storageId) const
 
 ObjectGuid::LowType GroupMgr::GenerateGroupId()
 {
-    if (NextGroupId >= 0xFFFFFFFE)
+    if (NextGroupId.load() >= 0xFFFFFFFE)
     {
         TC_LOG_ERROR("misc", "Group guid overflow!! Can't continue, shutting down server. ");
         World::StopNow(ERROR_EXIT_CODE);
     }
-    return NextGroupId++;
+    return NextGroupId++;   // atomic post-increment
 }
 
 GroupMgr* GroupMgr::instance()
@@ -102,6 +106,7 @@ GroupMgr* GroupMgr::instance()
 
 Group* GroupMgr::GetGroupByGUID(ObjectGuid::LowType groupId) const
 {
+    std::shared_lock<std::shared_mutex> lock(_groupStoreLock);
     GroupContainer::const_iterator itr = GroupStore.find(groupId);
     if (itr != GroupStore.end())
         return itr->second;
@@ -111,17 +116,30 @@ Group* GroupMgr::GetGroupByGUID(ObjectGuid::LowType groupId) const
 
 void GroupMgr::Update(uint32 diff)
 {
-    for (auto group : GroupStore)
-        group.second->Update(diff);
+    // snapshot the group pointers under the store lock, then release it before
+    // calling Group::Update — Update can disband and call back into RemoveGroup,
+    // which takes this lock exclusively (would deadlock if held shared here) (A4)
+    std::vector<Group*> groups;
+    {
+        std::shared_lock<std::shared_mutex> lock(_groupStoreLock);
+        groups.reserve(GroupStore.size());
+        for (auto const& group : GroupStore)
+            groups.push_back(group.second);
+    }
+
+    for (Group* group : groups)
+        group->Update(diff);
 }
 
 void GroupMgr::AddGroup(Group* group)
 {
+    std::unique_lock<std::shared_mutex> lock(_groupStoreLock);
     GroupStore[group->GetLowGUID()] = group;
 }
 
 void GroupMgr::RemoveGroup(Group* group)
 {
+    std::unique_lock<std::shared_mutex> lock(_groupStoreLock);
     GroupStore.erase(group->GetLowGUID());
 }
 

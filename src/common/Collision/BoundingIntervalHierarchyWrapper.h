@@ -22,6 +22,7 @@
 #include <G3D/Table.h>
 #include <G3D/Array.h>
 #include <G3D/Set.h>
+#include <mutex>
 
 template<class T, class BoundsFunc = BoundsTrait<T> >
 class BIHWrap
@@ -62,28 +63,15 @@ class BIHWrap
     G3D::Table<const T*, uint32> m_obj2Idx;
     G3D::Set<const T*> m_objects_to_push;
     int unbalanced_times;
+    // @megaserver D: a query (intersectRay/Point) lazily rebuilds the tree (balance),
+    // mutating m_objects/m_obj2Idx/m_objects_to_push/m_tree + G3D's BufferPool. So a
+    // *query* mutates shared state — concurrent combat-update workers querying the same
+    // dynamic-tree node race (TSan-confirmed). This per-node lock serializes that node's
+    // queries+edits; distinct nodes/cells stay parallel. Held across the traversal so the
+    // GameObjectModel intersects (BufferPool/Table) under it are serialized too.
+    mutable std::mutex m_lock;
 
-public:
-    BIHWrap() : unbalanced_times(0) { }
-
-    void insert(const T& obj)
-    {
-        ++unbalanced_times;
-        m_objects_to_push.insert(&obj);
-    }
-
-    void remove(const T& obj)
-    {
-        ++unbalanced_times;
-        uint32 Idx = 0;
-        const T * temp;
-        if (m_obj2Idx.getRemove(&obj, temp, Idx))
-            m_objects[Idx] = nullptr;
-        else
-            m_objects_to_push.remove(&obj);
-    }
-
-    void balance()
+    void balanceInternal()
     {
         if (unbalanced_times == 0)
             return;
@@ -97,10 +85,39 @@ public:
         m_tree.build(m_objects, BoundsFunc::getBounds2);
     }
 
+public:
+    BIHWrap() : unbalanced_times(0) { }
+
+    void insert(const T& obj)
+    {
+        std::lock_guard<std::mutex> guard(m_lock);
+        ++unbalanced_times;
+        m_objects_to_push.insert(&obj);
+    }
+
+    void remove(const T& obj)
+    {
+        std::lock_guard<std::mutex> guard(m_lock);
+        ++unbalanced_times;
+        uint32 Idx = 0;
+        const T * temp;
+        if (m_obj2Idx.getRemove(&obj, temp, Idx))
+            m_objects[Idx] = nullptr;
+        else
+            m_objects_to_push.remove(&obj);
+    }
+
+    void balance()
+    {
+        std::lock_guard<std::mutex> guard(m_lock);
+        balanceInternal();
+    }
+
     template<typename RayCallback>
     void intersectRay(const G3D::Ray& ray, RayCallback& intersectCallback, float& maxDist)
     {
-        balance();
+        std::lock_guard<std::mutex> guard(m_lock);
+        balanceInternal();
         MDLCallback<RayCallback> temp_cb(intersectCallback, m_objects.getCArray(), m_objects.size());
         m_tree.intersectRay(ray, temp_cb, maxDist, true);
     }
@@ -108,7 +125,8 @@ public:
     template<typename IsectCallback>
     void intersectPoint(const G3D::Vector3& point, IsectCallback& intersectCallback)
     {
-        balance();
+        std::lock_guard<std::mutex> guard(m_lock);
+        balanceInternal();
         MDLCallback<IsectCallback> callback(intersectCallback, m_objects.getCArray(), m_objects.size());
         m_tree.intersectPoint(point, callback);
     }

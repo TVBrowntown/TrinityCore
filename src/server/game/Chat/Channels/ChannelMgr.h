@@ -19,6 +19,7 @@
 
 #include "Define.h"
 #include "Hash.h"
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -52,6 +53,9 @@ class TC_GAME_API ChannelMgr
         CustomChannelContainer _customChannels;
         BuiltinChannelContainer _channels;
         uint32 const _team;
+        // @megaserver A4: guard both channel maps (lookup/create/erase) so the global
+        // channel registry is memory-safe under parallel chat handlers (uncontended until C).
+        mutable std::shared_mutex _channelLock;
 
         static void MakeNotOnPacket(WorldPacket* data, std::string const& name);
 };

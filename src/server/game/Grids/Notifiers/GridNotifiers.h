@@ -57,7 +57,13 @@ namespace Trinity
 
     struct TC_GAME_API PlayerRelocationNotifier : public VisibleNotifier
     {
-        PlayerRelocationNotifier(Player &player) : VisibleNotifier(player) { }
+        // @megaserver B1: in full-rescan mode a player may be processed because
+        // its NEIGHBOURHOOD moved, not because it moved. Creature-AI line-of-sight
+        // (MoveInLineOfSight) must still only fire when the player itself moved, so
+        // the player pass passes playerMoved through. Defaults true → the legacy
+        // cell-driven path (only moved players) behaves exactly as before.
+        bool i_playerMoved;
+        PlayerRelocationNotifier(Player &player, bool playerMoved = true) : VisibleNotifier(player), i_playerMoved(playerMoved) { }
 
         template<class T> void Visit(GridRefManager<T> &m) { VisibleNotifier::Visit(m); }
         void Visit(CreatureMapType &);

@@ -16,6 +16,7 @@
  */
 
 #include "Unit.h"
+#include <atomic>   // @megaserver D outcome-diff
 #include "AbstractFollower.h"
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
@@ -314,6 +315,9 @@ Unit::Unit(bool isWorldObject) :
 {
     m_objectType |= TYPEMASK_UNIT;
     m_objectTypeId = TYPEID_UNIT;
+
+    // far away so the first relocation notify always processes (spawn visibility)
+    m_lastNotifyPosition.Relocate(-5000.0f, -5000.0f, -5000.0f, 0.0f);
 
     m_updateFlag = (UPDATEFLAG_LIVING | UPDATEFLAG_STATIONARY_POSITION);
 
@@ -719,8 +723,52 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
     }
 }
 
+// @megaserver D harness: immortal-players toggle (see Unit.h)
+static bool s_combatLoadGenImmortalPlayers = false;
+void SetCombatLoadGenImmortalPlayers(bool on) { s_combatLoadGenImmortalPlayers = on; }
+
+// @megaserver D: set by the parallel combat workers (defined in Map.cpp)
+extern thread_local bool t_inParallelCombat;
+
+// @megaserver D outcome-diff: safe-distance interaction monitor. The parallel combat
+// pass is outcome-equivalent to serial iff no combat interaction occurs between two
+// SAME-COLOR cells (which are >= safe distance apart). So we record the max distance of
+// every combat interaction that happens inside a parallel worker; if it stays below the
+// safe distance, no same-color interaction is possible -> parallel == serial (with TSan
+// clean). Anything >= safe distance is logged as a potential reorder hazard.
+static bool s_combatValidate = false;
+static float s_combatSafeDistance = 200.0f;
+static std::atomic<uint32> s_intMaxDist{0};      // max interaction distance (yd, rounded)
+static std::atomic<unsigned long long> s_intCount{0};
+static std::atomic<unsigned long long> s_intViolations{0};   // interactions >= safe distance
+void SetCombatValidate(bool on, float safeDist) { s_combatValidate = on; if (safeDist > 0) s_combatSafeDistance = safeDist; }
+void GetCombatValidateStats(unsigned long long& count, unsigned long long& viol, uint32& maxDist)
+{ count = s_intCount.exchange(0); viol = s_intViolations.exchange(0); maxDist = s_intMaxDist.exchange(0); }
+
 /*static*/ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellInfo const* spellProto, bool durabilityLoss)
 {
+    // @megaserver D harness: zero out damage to players so a hostile-creature combat
+    // load test sustains forever — the swing, threat and combat state still register.
+    if (s_combatLoadGenImmortalPlayers && victim->GetTypeId() == TYPEID_PLAYER)
+        damage = 0;
+
+    // @megaserver D outcome-diff: record interaction distance when inside a parallel worker.
+    // For pets/guardians/summons the attacker↔owner distance also matters (the pet's update
+    // touches its owner — a cross-cell hazard if the owner is far), so take the max of
+    // attacker→victim and attacker→owner.
+    if (s_combatValidate && t_inParallelCombat && attacker && attacker != victim)
+    {
+        float d = attacker->GetExactDist(victim);
+        if (Unit* owner = attacker->GetCharmerOrOwner())
+            d = std::max(d, attacker->GetExactDist(owner));
+        uint32 const di = uint32(d + 0.5f);
+        uint32 prev = s_intMaxDist.load(std::memory_order_relaxed);
+        while (di > prev && !s_intMaxDist.compare_exchange_weak(prev, di, std::memory_order_relaxed)) {}
+        s_intCount.fetch_add(1, std::memory_order_relaxed);
+        if (d >= s_combatSafeDistance)
+            s_intViolations.fetch_add(1, std::memory_order_relaxed);
+    }
+
     uint32 rage_damage = damage + (cleanDamage ? cleanDamage->absorbed_damage : 0);
 
     if (UnitAI* victimAI = victim->GetAI())

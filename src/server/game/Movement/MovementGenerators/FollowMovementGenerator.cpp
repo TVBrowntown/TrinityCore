@@ -69,6 +69,9 @@ void FollowMovementGenerator::Initialize(Unit* owner)
     UpdatePetSpeed(owner);
     _path = nullptr;
     _lastTargetPosition.reset();
+    _lastDestination.reset();
+    _lastTargetWasMoving = false;
+    _lastWalkSent = false;
 }
 
 void FollowMovementGenerator::Reset(Unit* owner)
@@ -94,6 +97,7 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
         _path = nullptr;
         owner->StopMoving();
         _lastTargetPosition.reset();
+        _lastDestination.reset();
         return true;
     }
 
@@ -107,22 +111,35 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
             _path = nullptr;
             owner->StopMoving();
             _lastTargetPosition.reset();
+            _lastDestination.reset();
             DoMovementInform(owner, target);
             return true;
         }
     }
 
+    // Capture spline-finalize BEFORE the cleanup block clears UNIT_STATE_FOLLOW_MOVE.
+    // We need to re-enter the path block this tick if a truncated run-spline just
+    // finished, so the walk-finish leg can launch immediately after.
+    bool const splineJustFinalized = owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) && owner->movespline->Finalized();
+
     if (owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) && owner->movespline->Finalized())
     {
         RemoveFlag(MOVEMENTGENERATOR_FLAG_INFORM_ENABLED);
         _path = nullptr;
+        _lastDestination.reset();
         owner->ClearUnitState(UNIT_STATE_FOLLOW_MOVE);
         DoMovementInform(owner, target);
     }
 
-    if (!_lastTargetPosition || _lastTargetPosition->GetExactDistSq(target->GetPosition()) > 0.0f)
+    // Re-evaluate when the target moves OR transitions from moving to stopped
+    // OR our own spline just finished (so a two-stage approach can fire its
+    // second leg without waiting for the owner to move again).
+    bool const targetMoved = !_lastTargetPosition || _lastTargetPosition->GetExactDistSq(target->GetPosition()) > 0.0f;
+    bool const targetJustStopped = _lastTargetWasMoving && !target->isMoving();
+    if (targetMoved || targetJustStopped || splineJustFinalized)
     {
         _lastTargetPosition = target->GetPosition();
+        _lastTargetWasMoving = target->isMoving();
         if (owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) || !PositionOkay(owner, target, _range + FOLLOW_RANGE_TOLERANCE))
         {
             if (!_path)
@@ -149,6 +166,63 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
 
             if (owner->IsHovering())
                 owner->UpdateAllowedPositionZ(x, y, z);
+
+            // Two-stage approach: when a pet is approaching its stopped,
+            // out-of-combat owner, the FINAL leg should be at walk speed.
+            //  - Already within WALK_FINISH_RADIUS  → walk this whole spline.
+            //  - Farther away                       → truncate this run-spline
+            //    to end WALK_FINISH_RADIUS short of the real destination, so
+            //    the next Update tick (after splineJustFinalized) re-evaluates
+            //    with the pet now within range and naturally fires the
+            //    walk-spline for the remaining leg.
+            // Net effect: consistent run-then-walk-then-stop regardless of
+            // starting distance, instead of "run the whole way → snap stop".
+            bool walkFinish = false;
+            if (Pet* oPet = owner->ToPet())
+            {
+                if (target->GetGUID() == oPet->GetOwnerGUID()
+                    && !target->isMoving()
+                    && !owner->IsInCombat())
+                {
+                    float const dx = x - owner->GetPositionX();
+                    float const dy = y - owner->GetPositionY();
+                    float const dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < WALK_FINISH_RADIUS)
+                    {
+                        walkFinish = true;
+                    }
+                    else if (dist > 0.01f)
+                    {
+                        // Cut the destination short along the direct line
+                        // from pet to dest. Pathfinder still routes around
+                        // obstacles to reach the truncated point.
+                        float const t = (dist - WALK_FINISH_RADIUS) / dist;
+                        float const dz = z - owner->GetPositionZ();
+                        x = owner->GetPositionX() + dx * t;
+                        y = owner->GetPositionY() + dy * t;
+                        z = owner->GetPositionZ() + dz * t;
+                        owner->UpdateAllowedPositionZ(x, y, z);
+                    }
+                }
+            }
+            bool const newWalk = target->IsWalking() || walkFinish;
+
+            // If we already have a follow spline in flight aimed at almost the
+            // same spot AND at the same walk/run speed, let it finish instead
+            // of bursting a new one every tick (each new spline triggers a
+            // stop+restart packet, which is the jittery "move-stop-move-stop"
+            // the player sees when backpedalling). A walk/run flip is allowed
+            // through so the walk-finish can pre-empt the active run-spline.
+            if (owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE)
+                && _lastDestination
+                && !owner->movespline->Finalized()
+                && newWalk == _lastWalkSent)
+            {
+                float destChangeSq = square(x - _lastDestination->GetPositionX())
+                                   + square(y - _lastDestination->GetPositionY());
+                if (destChangeSq < square(FOLLOW_RECALC_DISTANCE))
+                    return true;
+            }
 
             // pets are allowed to "cheat" on pathfinding when following their master
             bool allowShortcut = false;
@@ -213,10 +287,17 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
             else
                 init.MovebyPath(_path->GetPath());
 
-            init.SetWalk(target->IsWalking());
+            init.SetWalk(newWalk);
             init.SetSmooth(); // CatmullRom for smooth orientation along path
-            init.SetFacing(target->GetOrientation());
+            // Only align facing to the owner when the owner has actually stopped.
+            // Otherwise each new follow-spline (fired as the owner keeps moving)
+            // would snap the pet forward mid-stride, producing visible head-jerks
+            // while the player backpedals or strafes.
+            if (!target->isMoving())
+                init.SetFacing(target->GetOrientation());
             init.Launch();
+            _lastDestination = Position(x, y, z);
+            _lastWalkSent = newWalk;
         }
     }
     return true;

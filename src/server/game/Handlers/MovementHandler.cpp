@@ -31,6 +31,7 @@
 #include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "Player.h"
+#include "PlayerBroadcaster.h"
 #include "Transport.h"
 #include "Vehicle.h"
 #include "World.h"
@@ -359,23 +360,24 @@ void WorldSession::HandleMovementOpcodes(WorldPacket& recvData)
         mover->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_LANDING); // Parachutes
 
     /* process position-change */
+    movementInfo.guid = mover->GetGUID();
+    movementInfo.time = AdjustClientMovementTime(movementInfo.time);
+    mover->m_movementInfo = movementInfo;
+
     WorldPacket data(opcode, recvData.size());
-    int64 movementTime = (int64) movementInfo.time + _timeSyncClockDelta;
-    if (_timeSyncClockDelta == 0 || movementTime < 0 || movementTime > 0xFFFFFFFF)
+    WriteMovementInfo(&data, &movementInfo);
+    // movement broadcaster: relay our own movement from the broadcaster
+    // threads instead of a grid visit on the map thread. Charmed/vehicle
+    // movers (mover != _player) keep the legacy path - they are rare and
+    // have different self-echo semantics.
+    if (mover == _player && _player->GetPacketBroadcaster())
     {
-        TC_LOG_WARN("misc", "The computed movement time using clockDelta is erronous. Using fallback instead");
-        movementInfo.time = GameTime::GetGameTimeMS();
+        // cache position for the broadcaster's distance-based throttling
+        _player->GetPacketBroadcaster()->SetPosition(movementInfo.pos.GetPositionX(), movementInfo.pos.GetPositionY(), movementInfo.pos.GetPositionZ());
+        _player->GetPacketBroadcaster()->QueuePacket(std::move(data), false, _player->GetGUID());
     }
     else
-    {
-        movementInfo.time = (uint32)movementTime;
-    }
-
-    movementInfo.guid = mover->GetGUID();
-    WriteMovementInfo(&data, &movementInfo);
-    mover->SendMessageToSet(&data, _player);
-
-    mover->m_movementInfo = movementInfo;
+        mover->SendMessageToSet(&data, _player);
 
     // Some vehicles allow the passenger to turn by himself
     if (Vehicle* vehicle = mover->GetVehicle())
@@ -536,16 +538,7 @@ void WorldSession::HandleForceSpeedChangeAck(WorldPacket &recvData)
     }
 
     /* the client data has been verified. let's do the actual change now */
-    int64 movementTime = (int64)movementInfo.time + _timeSyncClockDelta;
-    if (_timeSyncClockDelta == 0 || movementTime < 0 || movementTime > 0xFFFFFFFF)
-    {
-        TC_LOG_WARN("misc", "The computed movement time using clockDelta is erronous. Using fallback instead");
-        movementInfo.time = GameTime::GetGameTimeMS();
-    }
-    else
-    {
-        movementInfo.time = (uint32)movementTime;
-    }
+    movementInfo.time = AdjustClientMovementTime(movementInfo.time);
 
     mover->m_movementInfo = movementInfo;
     mover->UpdatePosition(movementInfo.pos);
@@ -636,17 +629,7 @@ void WorldSession::HandleMoveKnockBackAck(WorldPacket& recvData)
     MovementInfo movementInfo;
     movementInfo.guid = guid;
     ReadMovementInfo(recvData, &movementInfo);
-
-    int64 movementTime = (int64)movementInfo.time + _timeSyncClockDelta;
-    if (_timeSyncClockDelta == 0 || movementTime < 0 || movementTime > 0xFFFFFFFF)
-    {
-        TC_LOG_WARN("misc", "The computed movement time using clockDelta is erronous. Using fallback instead");
-        movementInfo.time = GameTime::GetGameTimeMS();
-    }
-    else
-    {
-        movementInfo.time = (uint32)movementTime;
-    }
+    movementInfo.time = AdjustClientMovementTime(movementInfo.time);
 
     mover->m_movementInfo = movementInfo;
     mover->UpdatePosition(movementInfo.pos);

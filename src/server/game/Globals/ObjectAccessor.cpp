@@ -37,45 +37,57 @@ void HashMapHolder<T>::Insert(T* o)
         || std::is_same<Transport, T>::value,
         "Only Player and Transport can be registered in global HashMapHolder");
 
-    std::unique_lock<std::shared_mutex> lock(*GetLock());
+    std::size_t const shard = ShardFor(o->GetGUID());
+    std::unique_lock<std::shared_mutex> lock(GetLock(shard));
 
-    GetContainer()[o->GetGUID()] = o;
+    GetContainer(shard)[o->GetGUID()] = o;
 }
 
 template<class T>
 void HashMapHolder<T>::Remove(T* o)
 {
-    std::unique_lock<std::shared_mutex> lock(*GetLock());
+    std::size_t const shard = ShardFor(o->GetGUID());
+    std::unique_lock<std::shared_mutex> lock(GetLock(shard));
 
-    GetContainer().erase(o->GetGUID());
+    GetContainer(shard).erase(o->GetGUID());
 }
 
 template<class T>
 T* HashMapHolder<T>::Find(ObjectGuid guid)
 {
-    std::shared_lock<std::shared_mutex> lock(*GetLock());
+    std::size_t const shard = ShardFor(guid);
+    std::shared_lock<std::shared_mutex> lock(GetLock(shard));
 
-    typename MapType::iterator itr = GetContainer().find(guid);
-    return (itr != GetContainer().end()) ? itr->second : nullptr;
+    MapType& c = GetContainer(shard);
+    typename MapType::iterator itr = c.find(guid);
+    return (itr != c.end()) ? itr->second : nullptr;
 }
 
 template<class T>
-auto HashMapHolder<T>::GetContainer() -> MapType&
+auto HashMapHolder<T>::GetContainer(std::size_t shard) -> MapType&
 {
-    static MapType _objectMap;
-    return _objectMap;
+    static MapType _objectMap[NUM_SHARDS];
+    return _objectMap[shard];
 }
 
 template<class T>
-std::shared_mutex* HashMapHolder<T>::GetLock()
+std::shared_mutex& HashMapHolder<T>::GetLock(std::size_t shard)
 {
-    static std::shared_mutex _lock;
-    return &_lock;
+    static std::shared_mutex _lock[NUM_SHARDS];
+    return _lock[shard];
 }
 
-HashMapHolder<Player>::MapType const& ObjectAccessor::GetPlayers()
+HashMapHolder<Player>::MapType ObjectAccessor::GetPlayers()
 {
-    return HashMapHolder<Player>::GetContainer();
+    // merge a consistent snapshot across shards
+    HashMapHolder<Player>::MapType merged;
+    for (std::size_t shard = 0; shard < HashMapHolder<Player>::NUM_SHARDS; ++shard)
+    {
+        std::shared_lock<std::shared_mutex> lock(HashMapHolder<Player>::GetLock(shard));
+        HashMapHolder<Player>::MapType const& c = HashMapHolder<Player>::GetContainer(shard);
+        merged.insert(c.begin(), c.end());
+    }
+    return merged;
 }
 
 template class TC_GAME_API HashMapHolder<Player>;
@@ -85,14 +97,19 @@ namespace PlayerNameMapHolder
 {
     typedef std::unordered_map<std::string, Player*> MapType;
     static MapType PlayerNameMap;
+    // @megaserver A1: this map was UNLOCKED — read on whisper/invite/friend
+    // while written on login/logout, racing a rehash across the map threads.
+    static std::shared_mutex PlayerNameLock;
 
     void Insert(Player* p)
     {
+        std::unique_lock<std::shared_mutex> lock(PlayerNameLock);
         PlayerNameMap[p->GetName()] = p;
     }
 
     void Remove(Player* p)
     {
+        std::unique_lock<std::shared_mutex> lock(PlayerNameLock);
         PlayerNameMap.erase(p->GetName());
     }
 
@@ -102,6 +119,7 @@ namespace PlayerNameMapHolder
         if (!normalizePlayerName(charName))
             return nullptr;
 
+        std::shared_lock<std::shared_mutex> lock(PlayerNameLock);
         auto itr = PlayerNameMap.find(charName);
         return (itr != PlayerNameMap.end()) ? itr->second : nullptr;
     }
@@ -266,9 +284,8 @@ Player* ObjectAccessor::FindConnectedPlayerByName(std::string_view name)
 
 void ObjectAccessor::SaveAllPlayers()
 {
-    std::shared_lock<std::shared_mutex> lock(*HashMapHolder<Player>::GetLock());
-
-    HashMapHolder<Player>::MapType const& m = GetPlayers();
+    // @megaserver A2: GetPlayers() now snapshots across shards (locks internally)
+    HashMapHolder<Player>::MapType const m = GetPlayers();
     for (HashMapHolder<Player>::MapType::const_iterator itr = m.begin(); itr != m.end(); ++itr)
         itr->second->SaveToDB();
 }

@@ -17,6 +17,7 @@
 #include "G3D/platform.h"
 #include "G3D/System.h"
 #include "G3D/debug.h"
+#include <mutex>
 #include "G3D/fileutils.h"
 #include "G3D/TextOutput.h"
 #include "G3D/G3DGameUnits.h"
@@ -1026,7 +1027,12 @@ private:
     /** Pointer to the data in the tiny pool */
     void* tinyHeap;
 
-    Spinlock            m_lock;
+    // @megaserver D: was a hand-rolled CAS Spinlock — correct, but a busy-wait spinlock
+    // is invisible to ThreadSanitizer (it can't establish the happens-before), producing
+    // false-positive races on this globally-shared allocator under multi-map / parallel-
+    // combat threads. std::mutex is TSan-recognized and equally correct. All BufferPool
+    // access is already wrapped in lock()/unlock() and never re-enters, so non-recursive.
+    std::mutex          m_lock;
 
     void lock() {
         m_lock.lock();

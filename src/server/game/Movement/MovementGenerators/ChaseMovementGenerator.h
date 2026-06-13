@@ -49,6 +49,10 @@ class ChaseMovementGenerator : public MovementGenerator, public AbstractFollower
         static constexpr float PATH_RECALC_DISTANCE_THRESHOLD = 2.0f; // yards - only recalc if destination changes significantly
         static constexpr float MIN_CHASE_RELOCATE_DIST_SQ = 1.5f * 1.5f; // don't start a new spline for tiny movements
 
+        // Hysteresis band so brief speed wobbles don't snap predictive mode on/off
+        static constexpr float PREDICT_ENABLE_SPEED  = 1.5f; // yd/s — must reach this to start predicting
+        static constexpr float PREDICT_DISABLE_SPEED = 0.5f; // yd/s — must fall below this to stop predicting
+
         Optional<ChaseRange> const _range;
         Optional<ChaseAngle> const _angle;
 
@@ -59,9 +63,11 @@ class ChaseMovementGenerator : public MovementGenerator, public AbstractFollower
         bool _movingTowards = true;
         bool _mutualChase = true;
         uint32 _smoothMovementCount = 0; // tracks consecutive smooth updates
+        bool _predictiveActive = false; // sticky predictive-pursuit state, gated by hysteresis band above
 
-        // Predictive pursuit
-        Position PredictTargetPosition(Unit* owner, Unit* target, float maxPredictionTime = 2.0f);
+        // Predictive pursuit. 0.5s look-ahead = up to ~3.5y lead at run speed,
+        // short enough that a target turn corrects within one re-solve cycle.
+        Position PredictTargetPosition(Unit* owner, Unit* target, float maxPredictionTime = 0.5f);
 };
 
 #endif

@@ -82,6 +82,7 @@ class PlayerSocial;
 class ReputationMgr;
 class SpellCastTargets;
 class TradeData;
+class PlayerBroadcaster;
 
 enum InventoryType : uint8;
 enum ItemClass : uint8;
@@ -2191,6 +2192,38 @@ class TC_GAME_API Player : public Unit, public GridObject<Player>
 
         // currently visible objects at player client
         GuidUnorderedSet m_clientGUIDs;
+
+        // adaptive per-zone visibility: the zone this player currently
+        // contributes +1 to in ZoneDensity (0 = none). One matched inc/dec
+        // per player keeps the counts balanced regardless of stock paths.
+        uint32 m_densityCountedZone = 0;
+        void UpdateDensityCount(uint32 newZone);
+
+        // adaptive per-observer player-visibility cap: how far THIS player sees
+        // OTHER PLAYERS. Shrinks toward keeping the count of visible players
+        // near s_pcMaxVisible when in a crowded zone, leaving creatures / GOs /
+        // world view at full range. Starts effectively uncapped.
+        float m_playerVisRadius = 100000.0f;
+        uint32 m_playerCapTimer = 0;
+        float GetPlayerSightRange(WorldObject const* target) const;
+        void UpdatePlayerVisibilityRadius();
+        static void ConfigurePlayerCap(bool enabled, uint32 maxVisible, float minRadius, uint32 zoneGate);
+    private:
+        static bool s_pcEnabled;
+        static uint32 s_pcMaxVisible;
+        static float s_pcMinRadius;
+        static uint32 s_pcZoneGate;
+    public:
+
+        // movement-packet broadcaster (vmangos port); null until login or
+        // when Network.PacketBroadcast.Threads = 0
+        std::shared_ptr<PlayerBroadcaster> m_broadcaster;
+        void CreatePacketBroadcaster();
+        std::shared_ptr<PlayerBroadcaster> const& GetPacketBroadcaster() const { return m_broadcaster; }
+        // listener maintenance, called wherever m_clientGUIDs changes
+        void StartListeningTo(WorldObject* target);
+        void StopListeningTo(WorldObject* target);
+        void StopListeningToAll();
 
         bool HaveAtClient(Object const* u) const;
 

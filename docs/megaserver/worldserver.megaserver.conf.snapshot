@@ -1,0 +1,32 @@
+# Megaserver tuning config — snapshot of the megaserver-relevant keys in
+# worldserver.conf as deployed (2026-06-14). Credentials intentionally omitted.
+# Kill-switch for any feature: set its *.ParallelThreads (or .Enable) to 0.
+# See docs/megaserver/MEGASERVER_REPORT.md for the full rationale.
+
+Visibility.GroupMode = 1
+Visibility.Distance.Continents = 100
+Visibility.Distance.Instances  = 170
+Visibility.Distance.BG         = 533
+Visibility.Distance.Arenas     = 533
+Visibility.Notify.Period.OnContinents = 300
+Visibility.Notify.Period.InInstances  = 300
+Visibility.Notify.Period.InBG         = 300
+Visibility.Notify.Period.InArenas     = 300
+Visibility.PlayerCap.Enable = 1
+Visibility.PlayerCap.MaxVisible = 300
+Visibility.PlayerCap.MinRadius = 20
+Visibility.PlayerCap.ZoneGate = 400
+Visibility.FullRescan = 1
+Visibility.ParallelThreads = 4
+Visibility.ParallelMinPlayers = 50
+Visibility.ParallelProfile = 0
+LuaLock.Profile = 0
+Sessions.ParallelThreads = 4
+Sessions.ParallelMinSessions = 50
+Sessions.DeferPacketHooks = 1
+CombatLoadGen.ImmortalPlayers = 0
+CombatLoadGen.Profile = 0
+Combat.ParallelThreads = 4
+Combat.SafeStride = 4
+Combat.Validate = 1
+Combat.ParallelMaps = "0,1,530,571"

@@ -270,6 +270,14 @@ enum UnitState : uint32
 TC_GAME_API extern float baseMoveSpeed[MAX_MOVE_TYPE];
 TC_GAME_API extern float playerBaseMoveSpeed[MAX_MOVE_TYPE];
 
+// @megaserver D harness: when on, players take 0 damage (swings/threat/combat still
+// register) so a hostile-creature load test can sustain combat without bot deaths.
+TC_GAME_API void SetCombatLoadGenImmortalPlayers(bool on);
+
+// @megaserver D outcome-diff: safe-distance interaction monitor (see Unit.cpp)
+TC_GAME_API void SetCombatValidate(bool on, float safeDist);
+TC_GAME_API void GetCombatValidateStats(unsigned long long& count, unsigned long long& viol, uint32& maxDist);
+
 enum class MovementChangeType : uint8
 {
     INVALID,
@@ -1572,6 +1580,11 @@ class TC_GAME_API Unit : public WorldObject
         void SetPhaseMask(uint32 newPhaseMask, bool update, uint64 newPhaseId = 0) override;// overwrite Unit::SetPhaseMask
         // @tswow-end
         void UpdateObjectVisibility(bool forced = true) override;
+
+        // dynamic visibility: position at the last processed relocation
+        // notify; DelayedUnitRelocation skips units that have moved less than
+        // DynamicVisibilityMgr::GetReqMoveDistSq since then
+        Position m_lastNotifyPosition;
 
         SpellImmuneContainer m_spellImmune[MAX_SPELL_IMMUNITY];
         uint32 m_lastSanctuaryTime;

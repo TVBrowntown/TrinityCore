@@ -44,15 +44,21 @@ public:
 
     typedef std::unordered_map<ObjectGuid, T*> MapType;
 
+    // @megaserver A2: shard the global registry so concurrent FindPlayer reads
+    // (map threads, parallel-visibility workers, parallel sessions) and rare
+    // login/logout writes don't all serialize on one lock at 10k+ players.
+    static constexpr std::size_t NUM_SHARDS = 16;
+    static std::size_t ShardFor(ObjectGuid const& guid) { return std::size_t(guid.GetRawValue()) % NUM_SHARDS; }
+
     static void Insert(T* o);
 
     static void Remove(T* o);
 
     static T* Find(ObjectGuid guid);
 
-    static MapType& GetContainer();
+    static MapType& GetContainer(std::size_t shard);
 
-    static std::shared_mutex* GetLock();
+    static std::shared_mutex& GetLock(std::size_t shard);
 };
 
 namespace ObjectAccessor
@@ -81,8 +87,10 @@ namespace ObjectAccessor
     TC_GAME_API Player* FindConnectedPlayer(ObjectGuid const&);
     TC_GAME_API Player* FindConnectedPlayerByName(std::string_view name);
 
-    // when using this, you must use the hashmapholder's lock
-    TC_GAME_API HashMapHolder<Player>::MapType const& GetPlayers();
+    // @megaserver A2: returns a consistent snapshot merged across shards (by
+    // value). Safe for the main-thread consumers (who-list, SaveAllPlayers) —
+    // no player is freed concurrently on the main thread.
+    TC_GAME_API HashMapHolder<Player>::MapType GetPlayers();
 
     template<class T>
     void AddObject(T* object)

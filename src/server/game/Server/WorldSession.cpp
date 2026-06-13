@@ -28,6 +28,8 @@
 #include "Opcodes.h"
 // @tswow-end
 #include "WorldSession.h"
+#include "MovementBroadcaster.h"
+#include "PlayerBroadcaster.h"
 #include "AccountMgr.h"
 #include "AddonMgr.h"
 #include "BattlegroundMgr.h"
@@ -114,6 +116,81 @@ bool WorldSessionFilter::Process(WorldPacket* packet)
 
     //lets process all packets for non-in-the-world player
     return (player->IsInWorld() == false);
+}
+
+// @megaserver C: the audited parallel-safe opcode allow-list (read-only queries).
+// Verified handler-by-handler to write no shared state: NAME_QUERY reads the
+// A1-locked CharacterCache + A2-sharded registry; CREATURE/GAMEOBJECT/ITEM/QUEST
+// queries read the pre-built QueryData caches (CacheDataQueries=1 — the lazy
+// BuildQueryData *write* branch must be off); PAGE_TEXT/NPC_TEXT read immutable
+// ObjectMgr text stores; QUERY_TIME reads GameTime + config. All write only the
+// caller's own session. Keep this list conservative — a misclassified opcode that
+// writes shared state would race under parallelism.
+bool IsParallelSafeOpcode(uint16 opcode)
+{
+    switch (opcode)
+    {
+        case CMSG_NAME_QUERY:
+        case CMSG_CREATURE_QUERY:
+        case CMSG_GAMEOBJECT_QUERY:
+        case CMSG_ITEM_QUERY_SINGLE:
+        case CMSG_QUEST_QUERY:
+        case CMSG_PAGE_TEXT_QUERY:
+        case CMSG_NPC_TEXT_QUERY:
+        case CMSG_QUERY_TIME:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool ParallelSessionFilter::Process(WorldPacket* packet)
+{
+    OpcodeClient opcode = static_cast<OpcodeClient>(packet->GetOpcode());
+    if (!IsParallelSafeOpcode(opcode))
+        return false;   // stop draining this session here; serial pass takes the rest (order preserved)
+
+    // only when the player is in world (matches the queries' STATUS_LOGGEDIN gate);
+    // pre-world packets fall through to the serial pass
+    Player* player = m_pSession->GetPlayer();
+    return player && player->IsInWorld();
+}
+
+// @megaserver A3: deferred packet-observer hook buffer (see WorldSession.h).
+class DeferredPacketHooks
+{
+public:
+    std::vector<std::pair<WorldSession*, WorldPacket>> received;
+    std::vector<std::pair<WorldSession*, WorldPacket>> sent;
+};
+
+thread_local DeferredPacketHooks* t_deferredPacketHooks = nullptr;
+
+DeferredPacketHooks* CreateDeferredHookBuffer()
+{
+    return new DeferredPacketHooks();
+}
+
+void FireDeferredHookBuffer(DeferredPacketHooks* buf)
+{
+    if (!buf)
+        return;
+    // fired on the main thread, after the parallel pass has joined — the global lua
+    // lock is taken here (uncontended, single-threaded), not on the query workers
+    for (std::pair<WorldSession*, WorldPacket>& pr : buf->received)
+        sScriptMgr->OnPacketReceive(pr.first, pr.second);
+    for (std::pair<WorldSession*, WorldPacket>& pr : buf->sent)
+        sScriptMgr->OnPacketSend(pr.first, pr.second);
+    buf->received.clear();
+    buf->sent.clear();
+}
+
+void FireAndDestroyDeferredHookBuffer(DeferredPacketHooks* buf)
+{
+    if (!buf)
+        return;
+    FireDeferredHookBuffer(buf);
+    delete buf;
 }
 
 /// WorldSession constructor
@@ -260,7 +337,11 @@ void WorldSession::SendPacket(WorldPacket const* packet)
     }
 #endif                                                      // !TRINITY_DEBUG
 
-    sScriptMgr->OnPacketSend(this, *packet);
+    // @megaserver A3: defer the observer hook when in a parallel session worker
+    if (t_deferredPacketHooks)
+        t_deferredPacketHooks->sent.emplace_back(this, *packet);
+    else
+        sScriptMgr->OnPacketSend(this, *packet);
 
     TC_LOG_TRACE("network.opcode", "S->C: {} {}", GetPlayerInfo(), GetOpcodeNameForLogging(static_cast<OpcodeServer>(packet->GetOpcode())));
     m_Socket->SendPacket(*packet);
@@ -348,7 +429,12 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
                     {
                         if(AntiDOS.EvaluateOpcode(*packet, currentTime))
                         {
-                            sScriptMgr->OnPacketReceive(this, *packet);
+                            // @megaserver A3: defer the observer hook if running in a
+                            // parallel session worker (avoids taking the global lua lock)
+                            if (t_deferredPacketHooks)
+                                t_deferredPacketHooks->received.emplace_back(this, *packet);
+                            else
+                                sScriptMgr->OnPacketReceive(this, *packet);
                             opHandle->Call(this, *packet);
                             LogUnprocessedTail(packet);
                         }
@@ -629,6 +715,20 @@ void WorldSession::LogoutPlayer(bool save)
         // the player may not be in the world when logging out
         // e.g if he got disconnected during a transfer to another map
         // calls to GetMap in this case may cause crashes
+        // movement broadcaster: drop socket/queue/listeners and unregister
+        // from the broadcast threads; stale shared_ptrs in other players'
+        // listener maps become no-ops
+        if (std::shared_ptr<PlayerBroadcaster> const& bcaster = _player->GetPacketBroadcaster())
+        {
+            // remove us from every broadcaster we were listening to, or our
+            // (dead) broadcaster leaks in their listener maps until they
+            // happen to re-see us (audit finding: asymmetric logout leak)
+            _player->StopListeningToAll();
+            bcaster->FreeAtLogout();
+            if (MovementBroadcaster* mb = MovementBroadcaster::instance())
+                mb->RemovePlayer(bcaster);
+        }
+
         _player->CleanupsBeforeDelete();
         TC_LOG_INFO("entities.player.character", "Account: {} (IP: {}) Logout Character:[{}] {} Level: {}, XP: {}/{} ({} left)",
             GetAccountId(), GetRemoteAddress(), _player->GetName(), _player->GetGUID().ToString(), _player->GetLevel(),
@@ -1778,6 +1878,18 @@ void WorldSession::SendTimeSync()
     // Schedule next sync in 10 sec (except for the 2 first packets, which are spaced by only 5s)
     _timeSyncTimer = _timeSyncNextCounter == 0 ? 5000 : 10000;
     _timeSyncNextCounter++;
+}
+
+uint32 WorldSession::AdjustClientMovementTime(uint32 time) const
+{
+    int64 movementTime = int64(time) + _timeSyncClockDelta;
+    if (_timeSyncClockDelta == 0 || movementTime < 0 || movementTime > 0xFFFFFFFF)
+    {
+        TC_LOG_WARN("misc", "The computed movement time using clockDelta is erronous. Using fallback instead");
+        return GameTime::GetGameTimeMS();
+    }
+    else
+        return uint32(movementTime);
 }
 
 bool WorldSession::IsRightUnitBeingMoved(ObjectGuid guid)

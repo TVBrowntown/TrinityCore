@@ -302,7 +302,7 @@ public:
         stmt->setUInt16(0, uint16(atLogin));
         CharacterDatabase.Execute(stmt);
 
-        std::shared_lock<std::shared_mutex> lock(*HashMapHolder<Player>::GetLock());
+        // @megaserver A2: GetPlayers() snapshots across shards (locks internally)
         HashMapHolder<Player>::MapType const& plist = ObjectAccessor::GetPlayers();
         for (HashMapHolder<Player>::MapType::const_iterator itr = plist.begin(); itr != plist.end(); ++itr)
             itr->second->SetAtLoginFlag(atLogin);

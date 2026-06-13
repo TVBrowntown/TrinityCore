@@ -28,8 +28,18 @@
 //  move map related classes
 namespace MMAP
 {
+    // @megaserver D: a dtNavMeshQuery holds a mutable node pool and is NOT thread-safe,
+    // but the underlying dtNavMesh is read-only and shareable. So instead of one query
+    // per instance, keep a small POOL of queries per instance, one per "query slot".
+    // Each parallel combat-update worker uses its own slot (SetNavMeshQuerySlot), so
+    // concurrent pathfinding never shares a query. Slot 0 is the main/serial thread.
+    enum { NAV_QUERY_SLOTS = 33 };  // slot 0 (main) + up to 32 parallel workers
+
     typedef std::unordered_map<uint32, dtTileRef> MMapTileSet;
-    typedef std::unordered_map<uint32, dtNavMeshQuery*> NavMeshQuerySet;
+    typedef std::unordered_map<uint32, std::vector<dtNavMeshQuery*>> NavMeshQuerySet;
+
+    // set the calling thread's navmesh-query slot (0 = main); a parallel worker sets index+1
+    TC_COMMON_API void SetNavMeshQuerySlot(int slot);
 
     // dummy struct to hold map's mmap data
     struct TC_COMMON_API MMapData
@@ -38,14 +48,17 @@ namespace MMAP
         ~MMapData()
         {
             for (NavMeshQuerySet::iterator i = navMeshQueries.begin(); i != navMeshQueries.end(); ++i)
-                dtFreeNavMeshQuery(i->second);
+                for (dtNavMeshQuery* q : i->second)
+                    if (q)
+                        dtFreeNavMeshQuery(q);
 
             if (navMesh)
                 dtFreeNavMesh(navMesh);
         }
 
-        // we have to use single dtNavMeshQuery for every instance, since those are not thread safe
-        NavMeshQuerySet navMeshQueries;     // instanceId to query
+        // instanceId -> per-slot query pool (size NAV_QUERY_SLOTS; slots created lazily,
+        // each used by one thread at a time so no per-query synchronization is needed)
+        NavMeshQuerySet navMeshQueries;
 
         dtNavMesh* navMesh;
         MMapTileSet loadedTileRefs;        // maps [map grid coords] to [dtTile]

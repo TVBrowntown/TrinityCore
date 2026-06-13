@@ -22,6 +22,7 @@
 #include "Common.h"
 #include "ObjectGuid.h"
 #include <map>
+#include <shared_mutex>
 
 class Player;
 class WorldPacket;
@@ -140,7 +141,9 @@ class SocialMgr
         static SocialMgr* instance();
 
         // Misc
-        void RemovePlayerSocial(ObjectGuid const& guid) { _socialMap.erase(guid); }
+        // @megaserver A4: guard the global _socialMap structure (insert/erase/iterate)
+        // so it can't be corrupted while another handler iterates it (uncontended until C).
+        void RemovePlayerSocial(ObjectGuid const& guid) { std::unique_lock<std::shared_mutex> lock(_socialMapLock); _socialMap.erase(guid); }
 
         static void GetFriendInfo(Player* player, ObjectGuid const& friendGUID, FriendInfo& friendInfo);
 
@@ -154,6 +157,7 @@ class SocialMgr
     private:
         typedef std::map<ObjectGuid, PlayerSocial> SocialMap;
         SocialMap _socialMap;
+        mutable std::shared_mutex _socialMapLock;
 };
 
 #define sSocialMgr SocialMgr::instance()

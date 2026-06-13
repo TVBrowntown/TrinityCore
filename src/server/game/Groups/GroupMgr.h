@@ -19,6 +19,9 @@
 #define _GROUPMGR_H
 
 #include "Group.h"
+#include <atomic>
+#include <mutex>
+#include <shared_mutex>
 
 class TC_GAME_API GroupMgr
 {
@@ -37,9 +40,9 @@ public:
     uint32 GenerateNewGroupDbStoreId();
     void   RegisterGroupDbStoreId(uint32 storageId, Group* group);
     void   FreeGroupDbStoreId(Group* group);
-    void   SetNextGroupDbStoreId(uint32 storageId) { NextGroupDbStoreId = storageId; };
+    void   SetNextGroupDbStoreId(uint32 storageId) { std::lock_guard<std::mutex> lock(_dbStoreLock); NextGroupDbStoreId = storageId; };
     Group* GetGroupByDbStoreId(uint32 storageId) const;
-    void   SetGroupDbStoreSize(uint32 newSize) { GroupDbStore.resize(newSize); }
+    void   SetGroupDbStoreSize(uint32 newSize) { std::lock_guard<std::mutex> lock(_dbStoreLock); GroupDbStore.resize(newSize); }
 
     void Update(uint32 diff);
 
@@ -49,10 +52,15 @@ public:
     void   RemoveGroup(Group* group);
 
 protected:
-    ObjectGuid::LowType           NextGroupId;
+    // @megaserver A4: group registry made memory-safe under parallel session
+    // handlers. NextGroupId is atomic; the coupled NextGroupDbStoreId + GroupDbStore
+    // share _dbStoreLock; GroupStore is guarded by a shared_mutex. (Uncontended until C.)
+    std::atomic<ObjectGuid::LowType> NextGroupId;
     uint32           NextGroupDbStoreId;
     GroupContainer   GroupStore;
     GroupDbContainer GroupDbStore;
+    mutable std::mutex        _dbStoreLock;
+    mutable std::shared_mutex _groupStoreLock;
 };
 
 #define sGroupMgr GroupMgr::instance()

@@ -75,6 +75,9 @@
 #include "OutdoorPvP.h"
 #include "OutdoorPvPMgr.h"
 #include "Pet.h"
+#include "PlayerBroadcaster.h"
+#include "ZoneDensity.h"
+#include "MovementBroadcaster.h"
 #include "PetitionMgr.h"
 #include "PoolMgr.h"
 #include "QueryHolder.h"
@@ -1077,6 +1080,15 @@ void Player::Update(uint32 p_time)
     if (!IsInWorld())
         return;
 
+    // adaptive player-visibility cap: re-evaluate our radius ~1/s
+    if (m_playerCapTimer <= p_time)
+    {
+        UpdatePlayerVisibilityRadius();
+        m_playerCapTimer = 1000;
+    }
+    else
+        m_playerCapTimer -= p_time;
+
     // undelivered mail
     if (m_nextMailDelivereTime && m_nextMailDelivereTime <= GameTime::GetGameTime())
     {
@@ -2007,6 +2019,7 @@ void Player::RemoveFromWorld()
             m_session->DoLootRelease(lootGuid);
         sOutdoorPvPMgr->HandlePlayerLeaveZone(this, m_zoneUpdateId);
         sBattlefieldMgr->HandlePlayerLeaveZone(this, m_zoneUpdateId);
+        UpdateDensityCount(0);   // release our adaptive per-zone visibility count
     }
 
     // Remove items from world before self - player must be found in Item::RemoveFromObjectUpdate
@@ -7188,6 +7201,89 @@ void Player::UpdateArea(uint32 newArea)
         RemoveRestFlag(REST_FLAG_IN_FACTION_AREA);
 }
 
+// Keeps exactly one ZoneDensity count per player: moves our +1 from the
+// previously-counted zone to newZone (0 = none, on world removal). Idempotent
+// for repeat calls with the same zone, so it's safe to call liberally.
+void Player::UpdateDensityCount(uint32 newZone)
+{
+    if (newZone == m_densityCountedZone)
+        return;
+    if (m_densityCountedZone)
+        ZoneDensity::PlayerLeftZone(m_densityCountedZone);
+    if (newZone)
+        ZoneDensity::PlayerEnteredZone(newZone);
+    m_densityCountedZone = newZone;
+}
+
+// ---- adaptive per-observer player-visibility cap ----
+bool Player::s_pcEnabled = true;
+uint32 Player::s_pcMaxVisible = 300;
+float Player::s_pcMinRadius = 20.0f;
+uint32 Player::s_pcZoneGate = 400;
+
+void Player::ConfigurePlayerCap(bool enabled, uint32 maxVisible, float minRadius, uint32 zoneGate)
+{
+    s_pcEnabled = enabled;
+    s_pcMaxVisible = maxVisible;
+    s_pcMinRadius = minRadius;
+    s_pcZoneGate = zoneGate;
+}
+
+// How far we see a specific OTHER PLAYER. Full configured range for our current
+// target and group members (combat/social relevance), otherwise capped by our
+// adaptive radius. Creatures / GOs / world view never come through here.
+float Player::GetPlayerSightRange(WorldObject const* target) const
+{
+    float const base = GetMap()->GetVisibilityRange();
+    if (!s_pcEnabled)
+        return base;
+
+    if (target)
+    {
+        if (target->GetGUID() == GetTarget())
+            return base;
+        if (Group const* group = GetGroup())
+            if (group->IsMember(target->GetGUID()))
+                return base;
+    }
+
+    return std::min(base, m_playerVisRadius);
+}
+
+// Nudges m_playerVisRadius toward keeping the number of visible players near
+// s_pcMaxVisible. Gradual steps + a deadband give hysteresis so observers don't
+// flicker at the boundary as the crowd shifts. Only engages in crowded zones;
+// elsewhere the radius is pinned to full so nothing is ever capped.
+void Player::UpdatePlayerVisibilityRadius()
+{
+    if (!s_pcEnabled)
+        return;
+
+    float const maxRange = GetMap()->GetVisibilityRange();
+
+    if (ZoneDensity::GetPlayerCount(GetZoneId()) < s_pcZoneGate)
+    {
+        m_playerVisRadius = maxRange;   // not a crowded zone: full range
+        return;
+    }
+
+    // count currently-visible players (same map thread that mutates the set)
+    uint32 visiblePlayers = 0;
+    for (ObjectGuid const& guid : m_clientGUIDs)
+        if (guid.IsPlayer())
+            ++visiblePlayers;
+
+    if (visiblePlayers > s_pcMaxVisible)
+        m_playerVisRadius *= 0.85f;                                   // too many: tighten
+    else if (visiblePlayers < (s_pcMaxVisible * 8) / 10 && m_playerVisRadius < maxRange)
+        m_playerVisRadius *= 1.15f;                                   // headroom: relax
+
+    if (m_playerVisRadius < s_pcMinRadius)
+        m_playerVisRadius = s_pcMinRadius;
+    if (m_playerVisRadius > maxRange)
+        m_playerVisRadius = maxRange;
+}
+
 void Player::UpdateZone(uint32 newZone, uint32 newArea)
 {
     if (!IsInWorld())
@@ -7198,6 +7294,7 @@ void Player::UpdateZone(uint32 newZone, uint32 newArea)
     m_zoneUpdateTimer = ZONE_UPDATE_INTERVAL;
 
     GetMap()->UpdatePlayerZoneStats(oldZone, newZone);
+    UpdateDensityCount(newZone);   // adaptive per-zone visibility
 
     // call leave script hooks immedately (before updating flags)
     if (oldZone != newZone)
@@ -22901,6 +22998,46 @@ inline void BeforeVisibilityDestroy<Creature>(Creature* t, Player* p)
         t->ToPet()->Remove(PET_SAVE_NOT_IN_SLOT, true);
 }
 
+void Player::CreatePacketBroadcaster()
+{
+    MovementBroadcaster* broadcaster = MovementBroadcaster::instance();
+    if (!broadcaster || !broadcaster->IsEnabled())
+        return;
+
+    m_broadcaster = std::make_shared<PlayerBroadcaster>(GetSession()->GetWorldSocket(), GetGUID());
+    m_broadcaster->SetPosition(GetPositionX(), GetPositionY(), GetPositionZ());   // seed for throttling
+    broadcaster->RegisterPlayer(m_broadcaster);
+}
+
+void Player::StartListeningTo(WorldObject* target)
+{
+    if (!m_broadcaster)
+        return;
+    if (Player* p = target->ToPlayer())
+        if (p->m_broadcaster)
+            p->m_broadcaster->AddListener(GetGUID(), m_broadcaster);
+}
+
+void Player::StopListeningTo(WorldObject* target)
+{
+    if (!m_broadcaster)
+        return;
+    if (Player* p = target->ToPlayer())
+        if (p->m_broadcaster)
+            p->m_broadcaster->RemoveListener(GetGUID());
+}
+
+void Player::StopListeningToAll()
+{
+    if (!m_broadcaster)
+        return;
+    for (ObjectGuid guid : m_clientGUIDs)
+        if (guid.IsPlayer())
+            if (Player* p = ObjectAccessor::FindConnectedPlayer(guid))
+                if (p->m_broadcaster)
+                    p->m_broadcaster->RemoveListener(GetGUID());
+}
+
 void Player::UpdateVisibilityOf(WorldObject* target)
 {
     if (HaveAtClient(target))
@@ -22912,6 +23049,7 @@ void Player::UpdateVisibilityOf(WorldObject* target)
 
             target->DestroyForPlayer(this);
             m_clientGUIDs.erase(target->GetGUID());
+            StopListeningTo(target);
 
             #ifdef TRINITY_DEBUG
                 TC_LOG_DEBUG("maps", "Object {} out of range for player {}. Distance = {}", target->GetGUID().ToString(), GetGUID().ToString(), GetDistance(target));
@@ -22924,6 +23062,7 @@ void Player::UpdateVisibilityOf(WorldObject* target)
         {
             target->SendUpdateToPlayer(this);
             m_clientGUIDs.insert(target->GetGUID());
+            StartListeningTo(target);
 
             #ifdef TRINITY_DEBUG
                 TC_LOG_DEBUG("maps", "Object {} is visible now for player {}. Distance = {}", target->GetGUID().ToString(), GetGUID().ToString(), GetDistance(target));
@@ -23000,6 +23139,7 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data, std::set<Unit*>& vi
 
             target->BuildOutOfRangeUpdateBlock(&data);
             m_clientGUIDs.erase(target->GetGUID());
+            StopListeningTo(target);
 
             #ifdef TRINITY_DEBUG
                 TC_LOG_DEBUG("maps", "Object {} is out of range for player {}. Distance = {}", target->GetGUID().ToString(), GetGUID().ToString(), GetDistance(target));
@@ -23012,6 +23152,7 @@ void Player::UpdateVisibilityOf(T* target, UpdateData& data, std::set<Unit*>& vi
         {
             target->BuildCreateUpdateBlockForPlayer(&data, this);
             UpdateVisibilityOf_helper(m_clientGUIDs, target, visibleNow);
+            StartListeningTo(target);
 
             #ifdef TRINITY_DEBUG
                 TC_LOG_DEBUG("maps", "Object {} is visible now for player {}. Distance = {}", target->GetGUID().ToString(), GetGUID().ToString(), GetDistance(target));
@@ -27533,9 +27674,25 @@ void Player::ApplyAutolearnSpells(uint32 fromLevel)
 }
 
 void Player::SetSelection(ObjectGuid guid) {
-    uint64_t old = GetGuidValue(UNIT_FIELD_TARGET).GetRawValue();
+    ObjectGuid const oldGuid = GetGuidValue(UNIT_FIELD_TARGET);
     SetGuidValue(UNIT_FIELD_TARGET, guid);
-    FIRE(Unit,OnSetTarget, TSUnit(this), guid.GetRawValue(), old);
+    FIRE(Unit,OnSetTarget, TSUnit(this), guid.GetRawValue(), oldGuid.GetRawValue());
+
+    // interest management: pin ourselves to full-fidelity movement in the
+    // broadcaster of the player we now target (and unpin the old one), so our
+    // target's movement is never throttled for us even at range. Only players
+    // have broadcasters; creature targets are a no-op.
+    if (oldGuid != guid && m_broadcaster)
+    {
+        if (oldGuid.IsPlayer())
+            if (Player* op = ObjectAccessor::FindConnectedPlayer(oldGuid))
+                if (std::shared_ptr<PlayerBroadcaster> const& obc = op->GetPacketBroadcaster())
+                    obc->SetListenerPinned(GetGUID(), false);
+        if (guid.IsPlayer())
+            if (Player* np = ObjectAccessor::FindConnectedPlayer(guid))
+                if (std::shared_ptr<PlayerBroadcaster> const& nbc = np->GetPacketBroadcaster())
+                    nbc->SetListenerPinned(GetGUID(), true);
+    }
 }
 
 // Stat Override System Implementation

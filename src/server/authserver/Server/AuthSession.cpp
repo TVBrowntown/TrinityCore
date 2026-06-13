@@ -517,7 +517,6 @@ bool AuthSession::HandleLogonProof()
         stmt->setString(3, _os);
         stmt->setInt16(4, _timezoneOffset.count());
         stmt->setString(5, _accountInfo.Login);
-        LoginDatabase.DirectExecute(stmt);
 
         // Finish SRP6 and send the final result to the client
         Trinity::Crypto::SHA1::Digest M2 = Trinity::Crypto::SRP6::GetSessionVerifier(logonProof->A, logonProof->clientM, _sessionKey);
@@ -548,8 +547,16 @@ bool AuthSession::HandleLogonProof()
             std::memcpy(packet.contents(), &proof, sizeof(proof));
         }
 
-        SendPacket(packet);
-        _status = STATUS_AUTHED;
+        // Write the session key asynchronously and only send the proof from
+        // the completion callback: the client cannot hit the worldserver
+        // before the key is committed, and the auth I/O thread (shared by all
+        // connecting clients) never blocks on the database.
+        _queryProcessor.AddCallback(LoginDatabase.AsyncQuery(stmt).WithPreparedCallback(
+            [this, packet = std::move(packet)](PreparedQueryResult) mutable
+        {
+            SendPacket(packet);
+            _status = STATUS_AUTHED;
+        }));
     }
     else
     {

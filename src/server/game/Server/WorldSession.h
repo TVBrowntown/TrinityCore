@@ -372,6 +372,39 @@ public:
     virtual bool Process(WorldPacket* packet) override;
 };
 
+// @megaserver C: returns true for the audited set of read-only, session-local
+// query opcodes that are safe to dispatch from a parallel worker thread (they
+// read only immutable-after-startup ObjectMgr query caches + A1-locked
+// CharacterCache + A2-sharded registry, and write only the calling player's own
+// session + outgoing packet). Anything else returns false, so the parallel pass
+// drains only the leading run of safe opcodes per session and stops — preserving
+// per-session packet order. ProcessUnsafe()=false → no logout/lifecycle work runs
+// in the parallel pass (same contract as MapSessionFilter).
+TC_GAME_API bool IsParallelSafeOpcode(uint16 opcode);
+class ParallelSessionFilter : public PacketFilter
+{
+public:
+    explicit ParallelSessionFilter(WorldSession* pSession) : PacketFilter(pSession) { }
+    ~ParallelSessionFilter() { }
+
+    virtual bool Process(WorldPacket* packet) override;
+    virtual bool ProcessUnsafe() const override { return false; }
+};
+
+// @megaserver A3 (deferred packet-observer hooks): when a parallel session worker
+// has set t_deferredPacketHooks, OnPacketReceive/OnPacketSend are buffered instead
+// of fired inline — so the query workers never take the global lua lock. The main
+// thread drains+fires them after the pass joins (FireAndDestroyDeferredHookBuffer).
+// Observer hooks only — they feed no synchronous return value into the engine, so
+// firing them a tick later, batched, is semantically safe. Definition lives in
+// WorldSession.cpp (where WorldPacket is a complete type).
+class DeferredPacketHooks;
+TC_GAME_API extern thread_local DeferredPacketHooks* t_deferredPacketHooks;
+TC_GAME_API DeferredPacketHooks* CreateDeferredHookBuffer();
+TC_GAME_API void FireAndDestroyDeferredHookBuffer(DeferredPacketHooks* buf);
+// fire the buffered hooks (main thread) and clear it for reuse — does NOT delete
+TC_GAME_API void FireDeferredHookBuffer(DeferredPacketHooks* buf);
+
 // Proxy structure to contain data passed to callback function,
 // only to prevent bloating the parameter list
 class CharacterCreateInfo
@@ -444,6 +477,9 @@ class TC_GAME_API WorldSession
         ~WorldSession();
 
         bool PlayerLoading() const { return m_playerLoading; }
+        // movement broadcaster: PlayerBroadcaster holds the socket directly
+        // so broadcast threads never touch session/player state
+        std::shared_ptr<WorldSocket> GetWorldSocket() const { return m_Socket; }
         bool PlayerLogout() const { return m_playerLogout; }
         bool PlayerLogoutWithSave() const { return m_playerLogout && m_playerSave; }
         bool PlayerRecentlyLoggedOut() const { return m_playerRecentlyLogout; }
@@ -649,6 +685,7 @@ class TC_GAME_API WorldSession
         // Time Synchronisation
         void ResetTimeSync();
         void SendTimeSync();
+        uint32 AdjustClientMovementTime(uint32 time) const;
 
         // Packets cooldown
         time_t GetCalendarEventCreationCooldown() const { return _calendarEventCreationCooldown; }

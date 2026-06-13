@@ -1333,21 +1333,29 @@ void AuraEffect::HandleShapeshiftBoosts(Unit* target, bool apply) const
             }
         }
 
-        PlayerSpellMap const& sp_list = target->ToPlayer()->GetSpellMap();
-        for (auto itr = sp_list.begin(); itr != sp_list.end(); ++itr)
+        // Guard: this block was added in commit adb772b974 ("fix shapeshiftnot imp")
+        // without a Player null-check. Without this guard, when a Creature with a
+        // shapeshift aura (e.g. mobs that cast Defensive Stance via SmartAI) dies,
+        // ToPlayer() returns nullptr and the GetSpellMap() call SIGSEGVs.
+        // The matching apply=true branch above already has this guard.
+        if (target->GetTypeId() == TYPEID_PLAYER)
         {
-            if (itr->second.state == PLAYERSPELL_REMOVED || itr->second.disabled)
-                continue;
+            PlayerSpellMap const& sp_list = target->ToPlayer()->GetSpellMap();
+            for (auto itr = sp_list.begin(); itr != sp_list.end(); ++itr)
+            {
+                if (itr->second.state == PLAYERSPELL_REMOVED || itr->second.disabled)
+                    continue;
 
-            if (itr->first == spellId || itr->first == spellId2)
-                continue;
+                if (itr->first == spellId || itr->first == spellId2)
+                    continue;
 
-            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(itr->first);
-            if (!spellInfo || !(spellInfo->IsPassive() || spellInfo->HasAttribute(SPELL_ATTR0_HIDDEN_CLIENTSIDE)))
-                continue;
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(itr->first);
+                if (!spellInfo || !(spellInfo->IsPassive() || spellInfo->HasAttribute(SPELL_ATTR0_HIDDEN_CLIENTSIDE)))
+                    continue;
 
-            if (spellInfo->StancesNot && (spellInfo->StancesNot & (UI64LIT(1) << (GetMiscValue() - 1))))
-                target->CastSpell(target, itr->first, this);
+                if (spellInfo->StancesNot && (spellInfo->StancesNot & (UI64LIT(1) << (GetMiscValue() - 1))))
+                    target->CastSpell(target, itr->first, this);
+            }
         }
 
         Unit::AuraApplicationMap& tAuras = target->GetAppliedAuras();

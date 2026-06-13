@@ -16,7 +16,9 @@
  */
 
 #include "GridNotifiers.h"
+#include "PlayerBroadcaster.h"
 #include "GridNotifiersImpl.h"
+#include "DynamicVisibility.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "UpdateData.h"
@@ -49,7 +51,9 @@ void VisibleNotifier::SendToSelf()
                         break;
                     case TYPEID_PLAYER:
                         i_player.UpdateVisibilityOf((*itr)->ToPlayer(), i_data, i_visibleNow);
-                        if (!(*itr)->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
+                        // @megaserver B2 FIX: symmetric cross-player write — race under
+                        // parallel visibility; the passenger picks us up in its own pass
+                        if (!Map::IsVisibilityFullRescan() && !(*itr)->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
                             (*itr)->ToPlayer()->UpdateVisibilityOf(&i_player);
                         break;
                     case TYPEID_UNIT:
@@ -73,8 +77,18 @@ void VisibleNotifier::SendToSelf()
         if (it->IsPlayer())
         {
             Player* player = ObjectAccessor::FindPlayer(*it);
-            if (player && !player->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
-                player->UpdateVisibilityOf(&i_player);
+            if (player)
+            {
+                if (std::shared_ptr<PlayerBroadcaster> const& bcaster = player->GetPacketBroadcaster())
+                    bcaster->RemoveListener(i_player.GetGUID());
+                // @megaserver B2 FIX: this symmetric out-of-range write touches
+                // ANOTHER player's m_clientGUIDs — a data race under the parallel
+                // visibility pass. Under full-rescan, suppress it: that player
+                // drops us in its OWN dirty-gated rescan (our marked cell is in
+                // its scan range while we are still within MAX_VISIBILITY_DISTANCE).
+                if (!Map::IsVisibilityFullRescan() && !player->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
+                    player->UpdateVisibilityOf(&i_player);
+            }
         }
     }
 
@@ -160,7 +174,11 @@ void PlayerRelocationNotifier::Visit(PlayerMapType &m)
         if (player->m_seer->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
             continue;
 
-        player->UpdateVisibilityOf(&i_player);
+        // @megaserver B1: in full-rescan mode each player updates only its OWN
+        // visibility (disjoint writes → parallelizable); the other player picks
+        // us up in its own dirty-gated rescan. Legacy mode keeps the symmetric push.
+        if (!Map::IsVisibilityFullRescan())
+            player->UpdateVisibilityOf(&i_player);
     }
 }
 
@@ -176,7 +194,9 @@ void PlayerRelocationNotifier::Visit(CreatureMapType &m)
 
         i_player.UpdateVisibilityOf(c, i_data, i_visibleNow);
 
-        if (relocated_for_ai && !c->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
+        // creature AI notices the player — only when the player actually MOVED
+        // (i_playerMoved is true in legacy mode and for moved players in the pass)
+        if (relocated_for_ai && i_playerMoved && !c->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
             CreatureUnitRelocationWorker(c, &i_player);
     }
 }
@@ -187,7 +207,10 @@ void CreatureRelocationNotifier::Visit(PlayerMapType &m)
     {
         Player* player = iter->GetSource();
 
-        if (!player->m_seer->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
+        // @megaserver B1: in full-rescan mode the player picks up this creature
+        // in its own rescan (dirty-gated by the creature's marked cell); the
+        // creature loop only drives AI. Legacy mode keeps the visibility push.
+        if (!Map::IsVisibilityFullRescan() && !player->m_seer->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
             player->UpdateVisibilityOf(&i_creature);
 
         CreatureUnitRelocationWorker(&i_creature, player);
@@ -211,11 +234,19 @@ void CreatureRelocationNotifier::Visit(CreatureMapType &m)
 
 void DelayedUnitRelocation::Visit(CreatureMapType &m)
 {
+    float const reqMoveDistSq = DynamicVisibilityMgr::GetReqMoveDistSq(i_map.GetDynamicVisibilityMapType());
     for (CreatureMapType::iterator iter = m.begin(); iter != m.end(); ++iter)
     {
         Creature* unit = iter->GetSource();
         if (!unit->isNeedNotify(NOTIFY_VISIBILITY_CHANGED))
             continue;
+
+        // dynamic visibility: skip the (expensive) relocation sweep for units
+        // that have barely moved since their last processed notify. Flag-only
+        // changes (stealth, phase) use the forced/immediate path instead.
+        if (unit->GetExactDistSq(&unit->m_lastNotifyPosition) < reqMoveDistSq)
+            continue;
+        unit->m_lastNotifyPosition.Relocate(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ());
 
         CreatureRelocationNotifier relocate(*unit);
 
@@ -229,6 +260,12 @@ void DelayedUnitRelocation::Visit(CreatureMapType &m)
 
 void DelayedUnitRelocation::Visit(PlayerMapType &m)
 {
+    // @megaserver B1: full-rescan handles players in the dedicated player-driven
+    // pass (Map::ProcessRelocationNotifies); the cell-driven loop only does creatures.
+    if (Map::IsVisibilityFullRescan())
+        return;
+
+    float const reqMoveDistSq = DynamicVisibilityMgr::GetReqMoveDistSq(i_map.GetDynamicVisibilityMapType());
     for (PlayerMapType::iterator iter = m.begin(); iter != m.end(); ++iter)
     {
         Player* player = iter->GetSource();
@@ -239,6 +276,15 @@ void DelayedUnitRelocation::Visit(PlayerMapType &m)
 
         if (player != viewPoint && !viewPoint->IsPositionValid())
             continue;
+
+        // dynamic visibility: only gate the common self-view case; players
+        // seeing through another object always process
+        if (player == viewPoint)
+        {
+            if (player->GetExactDistSq(&player->m_lastNotifyPosition) < reqMoveDistSq)
+                continue;
+            player->m_lastNotifyPosition.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ());
+        }
 
         PlayerRelocationNotifier relocate(*player);
         Cell::VisitAllObjects(viewPoint, relocate, i_radius, false);

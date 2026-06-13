@@ -21,6 +21,8 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "UniqueTrackablePtr.h"
+#include <atomic>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -47,13 +49,16 @@ public:
     void RemoveGuild(ObjectGuid::LowType guildId);
 
     ObjectGuid::LowType GenerateGuildId();
-    void SetNextGuildId(ObjectGuid::LowType Id) { NextGuildId = Id; }
+    void SetNextGuildId(ObjectGuid::LowType Id) { NextGuildId.store(Id); }
 
     void ResetTimes();
 protected:
     typedef std::unordered_map<ObjectGuid::LowType, Trinity::unique_trackable_ptr<Guild>> GuildContainer;
-    ObjectGuid::LowType NextGuildId;
+    // @megaserver A4: NextGuildId atomic + GuildStore guarded so the global guild
+    // registry is memory-safe under parallel session handlers (uncontended until C).
+    std::atomic<ObjectGuid::LowType> NextGuildId;
     GuildContainer GuildStore;
+    mutable std::shared_mutex _guildStoreLock;
 };
 
 #define sGuildMgr GuildMgr::instance()
