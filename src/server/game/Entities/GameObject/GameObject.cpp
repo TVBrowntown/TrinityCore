@@ -2739,13 +2739,18 @@ void GameObject::BuildValuesUpdate(uint8 updateType, ByteBuffer* data, Player co
     // being clickable (no cursor, no lock "Opening" channel) the moment the objective is done — while players
     // who are still collecting keep the normal locked, channel-on-open object. Rides the same per-player
     // refresh as the quest sparkle (Player::UpdateVisibleGameobjectsOrSpellClicks, fired by ItemAddedQuestCheck).
-    uint32 questGoId = GetGoType() == GAMEOBJECT_TYPE_CHEST ? GetGOInfo()->chest.questId
-                     : GetGoType() == GAMEOBJECT_TYPE_GOOBER ? GetGOInfo()->goober.questId : 0;
+    // goober.questId is a SIGNED int32 and is -1 for "active for everyone" (the stock no-gate
+    // sentinel that ActivateToQuest checks, e.g. Marla's Grave 178090 in "Marla's Last Wish").
+    // Read it signed and only treat a POSITIVE id as a real quest gate — otherwise -1 read into a
+    // uint32 (0xFFFFFFFF) was taken as a real quest, found no such status, and the GO got hidden:
+    // it kept its sparkle (ActivateToQuest handles -1) but became un-selectable, breaking the quest.
+    int32 questGoId = GetGoType() == GAMEOBJECT_TYPE_CHEST ? int32(GetGOInfo()->chest.questId)
+                    : GetGoType() == GAMEOBJECT_TYPE_GOOBER ? GetGOInfo()->goober.questId : 0;
     // NB: applies to GMs too (no !targetIsGM) — a GM with GM-mode on would otherwise bypass the gate and the
     // object would stay clickable for them at complete, which reads as "the gate doesn't work" while testing.
-    bool hideFinishedQuestGo = questGoId != 0
-        && target->GetQuestStatus(questGoId) != QUEST_STATUS_INCOMPLETE;
-    if (questGoId != 0)
+    bool hideFinishedQuestGo = questGoId > 0
+        && target->GetQuestStatus(uint32(questGoId)) != QUEST_STATUS_INCOMPLETE;
+    if (questGoId > 0)
         forcedFlags = true;   // ALWAYS resend GAMEOBJECT_FLAGS for a quest chest/goober so NOT_SELECTABLE tracks
                               // the quest in BOTH directions — set when done, and CLEARED again on (re)accept.
                               // (Only forcing it when hiding leaves the flag stuck on after the quest restarts.)
