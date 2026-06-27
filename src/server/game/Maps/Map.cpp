@@ -1036,9 +1036,14 @@ void Map::UpdateEntitiesParallel(uint32 t_diff,
         }
 
         // merge per-worker update-object buffers into the real set (map thread, no lock)
+        // NOTE: an object queued into a worker buffer this pass may have been removed from
+        // world (e.g. died/despawned) before the barrier — RemoveUpdateObject only erases
+        // from _updateObjects, not from the buffers — so skip dead objects here, otherwise
+        // they get re-inserted and SendObjectUpdates trips ASSERT(obj->IsInWorld()).
         for (std::vector<Object*>& b : workerBufs)
             for (Object* o : b)
-                _updateObjects.insert(o);
+                if (o->IsInWorld())
+                    _updateObjects.insert(o);
     }
 }
 
@@ -3591,9 +3596,12 @@ void Map::SendObjectUpdates()
     while (!_updateObjects.empty())
     {
         Object* obj = *_updateObjects.begin();
-        ASSERT(obj->IsInWorld());
-
         _updateObjects.erase(_updateObjects.begin());
+        // Parallel-combat safety net: an object can be queued for an update and then removed
+        // from world before we get here. Skip it rather than ASSERT-crashing the map thread
+        // (it's correct — a gone object needs no field update). [megaserver map-thread race]
+        if (!obj->IsInWorld())
+            continue;
         obj->BuildUpdate(update_players);
     }
 
