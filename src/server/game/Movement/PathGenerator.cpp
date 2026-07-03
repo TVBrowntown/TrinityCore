@@ -63,6 +63,26 @@ bool PathGenerator::CalculatePath(float destX, float destY, float destZ, bool fo
 
     TC_METRIC_DETAILED_EVENT("mmap_events", "CalculatePath", "");
 
+    // @megaserver D: FREEZE FIX. PathGenerator is a persistent member of the movement
+    // generators (std::unique_ptr<PathGenerator> _path, created once and reused across
+    // ticks). The parallel combat-update pool can update the SAME creature on DIFFERENT
+    // worker threads on different ticks, and different creatures whose cached queries point
+    // at the same slot on the SAME tick. _navMeshQuery is a per-thread slot object and is
+    // NOT thread-safe (it owns a single dtNodePool). If two workers ever run findPath on one
+    // query concurrently, the node pool's hash chain (dtNodePool m_first/m_next) is corrupted
+    // into a self-referential link -> dtNodePool::getNode spins forever -> the world thread
+    // hangs -> FreezeDetector aborts at MaxCoreStuckTime. Re-acquire THIS thread's slot query
+    // every call (cheap map lookup) so no two concurrent workers ever share a query object.
+    {
+        uint32 const mapId = _source->GetMapId();
+        if (DisableMgr::IsPathfindingEnabled(mapId))
+        {
+            MMAP::MMapManager* mmap = MMAP::MMapFactory::createOrGetMMapManager();
+            _navMeshQuery = mmap->GetNavMeshQuery(mapId, _source->GetInstanceId());
+            _navMesh = _navMeshQuery ? _navMeshQuery->getAttachedNavMesh() : mmap->GetNavMesh(mapId);
+        }
+    }
+
     G3D::Vector3 dest(destX, destY, destZ);
     SetEndPosition(dest);
 
