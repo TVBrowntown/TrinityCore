@@ -47,6 +47,7 @@
 #include "Hyperlinks.h"
 #include "Log.h"
 #include "Loot.h"
+#include "AOELoot.h"
 #include "Map.h"
 #include "Metric.h"
 #include "MoveSpline.h"
@@ -261,6 +262,11 @@ WorldSession::~WorldSession()
     delete _RBACData;
 
     delete _gameClient;
+
+    // AOE Loot: unregister this session from the global corpse-viewer registry
+    // BEFORE it is freed, otherwise a later corpse removal would dereference a
+    // dangling WorldSession* in s_corpseViewers (use-after-free, TC #1993).
+    RemoveSessionFromViewerRegistry(this);
 
     // AOE Loot: Clean up virtual loot if still allocated
     delete m_virtualAOELoot;

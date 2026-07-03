@@ -382,3 +382,23 @@ void RemoveCorpseFromViewerRegistry(ObjectGuid corpseGuid)
         s_corpseViewers.erase(itr);
     }
 }
+
+// Called from ~WorldSession() so a destroyed session can never remain in the
+// registry as a dangling pointer (which would be dereferenced by
+// RemoveCorpseFromViewerRegistry on a later corpse removal -> use-after-free).
+void RemoveSessionFromViewerRegistry(WorldSession* session)
+{
+    if (!session)
+        return;
+
+    std::lock_guard<std::mutex> lock(s_corpseViewersMutex);
+
+    for (auto itr = s_corpseViewers.begin(); itr != s_corpseViewers.end(); )
+    {
+        itr->second.erase(session);
+        if (itr->second.empty())
+            itr = s_corpseViewers.erase(itr);
+        else
+            ++itr;
+    }
+}

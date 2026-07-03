@@ -39,6 +39,10 @@ TC_GAME_API void CleanupAOELootSession(WorldSession* session);
 // Remove corpse from viewer registry (called when corpse despawns)
 TC_GAME_API void RemoveCorpseFromViewerRegistry(ObjectGuid corpseGuid);
 
+// Remove a session from the viewer registry entirely (called when the
+// WorldSession is destroyed/logs out) so no dangling WorldSession* can remain.
+TC_GAME_API void RemoveSessionFromViewerRegistry(WorldSession* session);
+
 // Global corpse viewer registry (for real-time updates)
 // Declared here for access from Loot.cpp
 extern std::map<ObjectGuid, std::set<WorldSession*>> s_corpseViewers;
