@@ -22,6 +22,7 @@
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
