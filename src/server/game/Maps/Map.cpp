@@ -1075,6 +1075,20 @@ void Map::Update(uint32 t_diff)
         , t_diff
         );
     // @tswow-end tswow-events
+
+    // @megaserver: catch-up ceiling. Clamp a spiked diff so one slow tick can't
+    // compound into a death spiral (big diff -> more timers fire that tick -> slower
+    // tick -> even bigger diff). Losing a little game-time is far better than a runaway
+    // cascade; under sustained overload this degrades to graceful slow-mo. Normal ticks
+    // (well under 1s) are never touched.
+    static constexpr uint32 MAP_UPDATE_DIFF_CEILING_MS = 1000;
+    if (t_diff > MAP_UPDATE_DIFF_CEILING_MS)
+    {
+        TC_LOG_DEBUG("maps", "Map {} update diff {}ms exceeded ceiling, clamping to {}ms",
+            GetId(), t_diff, MAP_UPDATE_DIFF_CEILING_MS);
+        t_diff = MAP_UPDATE_DIFF_CEILING_MS;
+    }
+
     _dynamicTree.update(t_diff);
 
     {

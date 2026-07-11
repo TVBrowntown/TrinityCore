@@ -529,7 +529,7 @@ void Object::ClearUpdateMask(bool remove)
     }
 }
 
-void Object::BuildFieldsUpdate(Player* player, UpdateDataMapType& data_map) const
+void Object::BuildFieldsUpdate(Player* player, UpdateDataMapType& data_map, std::unordered_map<uint32, ByteBuffer>* valueCache /*= nullptr*/) const
 {
     UpdateDataMapType::iterator iter = data_map.find(player);
 
@@ -538,6 +538,28 @@ void Object::BuildFieldsUpdate(Player* player, UpdateDataMapType& data_map) cons
         std::pair<UpdateDataMapType::iterator, bool> p = data_map.emplace(player, UpdateData());
         ASSERT(p.second);
         iter = p.first;
+    }
+
+    // @megaserver: the serialized VALUES block depends on `player` ONLY through
+    // visibleFlag (see BuildValuesUpdate -> GetUpdateFieldData); object state
+    // (_changesMask / m_uint32Values) is identical for every observer this cycle.
+    // So observers sharing a visibleFlag get byte-identical blocks: build once, reuse.
+    if (valueCache)
+    {
+        uint32* flags = nullptr;
+        uint32 visibleFlag = GetUpdateFieldData(player, flags);
+        auto cit = valueCache->find(visibleFlag);
+        if (cit == valueCache->end())
+        {
+            ByteBuffer block;
+            block << uint8(UPDATETYPE_VALUES);
+            block << GetPackGUID();
+            BuildValuesUpdate(UPDATETYPE_VALUES, &block, player);
+            cit = valueCache->emplace(visibleFlag, std::move(block)).first;
+        }
+        iter->second.GetBuffer().append(cit->second);
+        iter->second.AddUpdateBlock();
+        return;
     }
 
     BuildValuesUpdateBlockForPlayer(&iter->second, iter->first);
@@ -3563,6 +3585,7 @@ struct WorldObjectChangeAccumulator
     UpdateDataMapType& i_updateDatas;
     WorldObject& i_object;
     GuidSet plr_list;
+    std::unordered_map<uint32, ByteBuffer> i_valueCache; // @megaserver: visibleFlag -> serialized VALUES block, per object per update cycle
     WorldObjectChangeAccumulator(WorldObject &obj, UpdateDataMapType &d) : i_updateDatas(d), i_object(obj) { }
     void Visit(PlayerMapType &m)
     {
@@ -3620,7 +3643,7 @@ struct WorldObjectChangeAccumulator
         // Only send update once to a player
         if (plr_list.find(player->GetGUID()) == plr_list.end() && player->HaveAtClient(&i_object))
         {
-            i_object.BuildFieldsUpdate(player, i_updateDatas);
+            i_object.BuildFieldsUpdate(player, i_updateDatas, &i_valueCache);
             plr_list.insert(player->GetGUID());
         }
     }

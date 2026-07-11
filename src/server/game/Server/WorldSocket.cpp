@@ -30,6 +30,8 @@
 #include "Realm.h"
 #include "ScriptMgr.h"
 #include "World.h"
+#include "Timer.h"
+#include <atomic>
 #include "WorldSession.h"
 #include <memory>
 
@@ -79,8 +81,30 @@ void WorldSocket::CheckIpCallback(PreparedQueryResult result)
     HandleSendAuthSession();
 }
 
+// @megaserver: lightweight always-on network counters (observability for a public
+// megaserver). File-scope atomics bumped on the hot path; one socket emits the rollup
+// per interval via CAS so there is no per-socket log spam.
+namespace
+{
+    std::atomic<uint64> g_netBytesRecv{ 0 };
+    std::atomic<uint64> g_netBytesSent{ 0 };
+    std::atomic<uint64> g_netPktsRecv{ 0 };
+    std::atomic<uint64> g_netPktsSent{ 0 };
+    std::atomic<uint32> g_netLastLogMs{ 0 };
+}
+
 bool WorldSocket::Update()
 {
+    // @megaserver: rollup net-stats, one socket per 60s (CAS gate)
+    {
+        uint32 nowMs = getMSTime();
+        uint32 lastMs = g_netLastLogMs.load(std::memory_order_relaxed);
+        if (getMSTimeDiff(lastMs, nowMs) >= 60000 && g_netLastLogMs.compare_exchange_strong(lastMs, nowMs))
+            TC_LOG_INFO("network", "Net stats (cumulative): recv {} pkts / {} bytes | sent {} pkts / {} bytes",
+                g_netPktsRecv.load(std::memory_order_relaxed), g_netBytesRecv.load(std::memory_order_relaxed),
+                g_netPktsSent.load(std::memory_order_relaxed), g_netBytesSent.load(std::memory_order_relaxed));
+    }
+
     EncryptablePacket* queued;
     if (_bufferQueue.Dequeue(queued))
     {
@@ -89,6 +113,8 @@ bool WorldSocket::Update()
         do
         {
             ServerPktHeader header(queued->size() + 2, queued->GetOpcode());
+            g_netPktsSent.fetch_add(1, std::memory_order_relaxed);
+            g_netBytesSent.fetch_add(queued->size() + header.getHeaderLength(), std::memory_order_relaxed);
             if (queued->NeedsEncryption())
                 _authCrypt.EncryptSend(header.header, header.getHeaderLength());
 
@@ -305,6 +331,8 @@ WorldSocket::ReadDataHandlerResult WorldSocket::ReadDataHandler()
     OpcodeClient opcode = static_cast<OpcodeClient>(header->cmd);
 
     WorldPacket packet(opcode, std::move(_packetBuffer));
+    g_netPktsRecv.fetch_add(1, std::memory_order_relaxed);
+    g_netBytesRecv.fetch_add(sizeof(ClientPktHeader) + packet.size(), std::memory_order_relaxed);
     WorldPacket* packetToQueue;
 
     if (sPacketLog->CanLogPacket())

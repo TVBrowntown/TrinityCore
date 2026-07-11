@@ -168,7 +168,10 @@ class TC_GAME_API Object
         void SetIsNewObject(bool enable) { m_isNewObject = enable; }
         bool IsNewObject() const { return m_isNewObject; }
         virtual void BuildUpdate(UpdateDataMapType&) { }
-        void BuildFieldsUpdate(Player*, UpdateDataMapType &) const;
+        // @megaserver: valueCache dedups the serialized VALUES block by visibleFlag
+        // (GetUpdateFieldData) so all observers in the same visibility class share one
+        // serialization instead of rebuilding per observer (EVE "serialize-once" idea).
+        void BuildFieldsUpdate(Player*, UpdateDataMapType &, std::unordered_map<uint32, ByteBuffer>* valueCache = nullptr) const;
 
         void SetFieldNotifyFlag(uint16 flag) { _fieldNotifyFlags |= flag; }
         void RemoveFieldNotifyFlag(uint16 flag) { _fieldNotifyFlags &= uint16(~flag); }
